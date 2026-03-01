@@ -1,0 +1,14 @@
+[package]
+name = "slate"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed" }
+# Pin core-text to 21.0.0 to avoid core-graphics 0.24/0.25 version conflict
+core-text = "=21.0.0"
+# smallvec is included here for convenience, it is used by gpui when creating
+# components that can have children. uncomment this line or
+# use `cargo add smallvec` to add it to your project
+#smallvec = "1.13.2"
