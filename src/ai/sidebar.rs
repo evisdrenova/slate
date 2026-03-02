@@ -8,6 +8,7 @@ use gpui_component::ActiveTheme;
 
 use crate::ai::provider::{ChatMessage, LlmProvider};
 use crate::db::schema::DatabaseSchema;
+use crate::db::types::DbType;
 
 #[derive(Clone)]
 pub enum AiEvent {
@@ -21,6 +22,7 @@ pub struct AiSidebar {
     input: Entity<InputState>,
     provider: Option<Arc<LlmProvider>>,
     schema: Option<DatabaseSchema>,
+    db_type: Option<DbType>,
     is_loading: bool,
     error: Option<String>,
     scroll_handle: UniformListScrollHandle,
@@ -36,6 +38,7 @@ impl AiSidebar {
             input: cx.new(|cx| InputState::new(window, cx).placeholder("Ask about your database...")),
             provider,
             schema: None,
+            db_type: None,
             is_loading: false,
             error: None,
             scroll_handle: UniformListScrollHandle::new(),
@@ -45,6 +48,10 @@ impl AiSidebar {
 
     pub fn set_schema(&mut self, schema: DatabaseSchema) {
         self.schema = Some(schema);
+    }
+
+    pub fn set_db_type(&mut self, db_type: DbType) {
+        self.db_type = Some(db_type);
     }
 
     fn schema_context(&self) -> Option<String> {
@@ -86,12 +93,13 @@ impl AiSidebar {
 
         let messages = self.messages.clone();
         let schema_ctx = self.schema_context();
+        let db_type_label = self.db_type.map(|dt| dt.label().to_string());
 
         cx.spawn(async move |this, cx| {
             let result: Result<String, anyhow::Error> = cx
                 .background_executor()
                 .spawn(async move {
-                    provider.send_message(&messages, schema_ctx.as_deref())
+                    provider.send_message(&messages, schema_ctx.as_deref(), db_type_label.as_deref())
                 })
                 .await;
 

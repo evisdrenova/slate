@@ -7,7 +7,7 @@ use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme, Disableable};
 
 use crate::db::connection::DatabaseService;
-use crate::db::types::ConnectionConfig;
+use crate::db::types::{ConnectionConfig, DbType};
 
 #[derive(Clone)]
 pub enum ConnectionEvent {
@@ -23,23 +23,41 @@ enum ConnectionStatus {
     Error(String),
 }
 
+struct ParsedUri {
+    host: String,
+    port: String,
+    user: String,
+    password: String,
+    database: String,
+}
+
 pub struct ConnectionDialog {
     focus_handle: FocusHandle,
+    db_type: DbType,
+    uri_input: Entity<InputState>,
     name_input: Entity<InputState>,
     host_input: Entity<InputState>,
     port_input: Entity<InputState>,
     user_input: Entity<InputState>,
     password_input: Entity<InputState>,
+    password_visible: bool,
+    pending_mask_toggle: bool,
     database_input: Entity<InputState>,
     status: ConnectionStatus,
     saved_connections: Vec<ConnectionConfig>,
     pending_load: Option<ConnectionConfig>,
+    pending_port_change: Option<String>,
+    pending_uri_parse: Option<ParsedUri>,
 }
 
 impl ConnectionDialog {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let saved = crate::connection::store::load_connections();
+        let db_type = DbType::MySQL;
 
+        let uri_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("postgres://user:pass@host:5432/dbname")
+        });
         let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("My Database"));
         let host_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -48,36 +66,122 @@ impl ConnectionDialog {
         });
         let port_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("3306")
-                .default_value("3306")
+                .placeholder(&db_type.default_port().to_string())
+                .default_value(&db_type.default_port().to_string())
         });
         let user_input = cx.new(|cx| InputState::new(window, cx).placeholder("root"));
-        let password_input = cx.new(|cx| InputState::new(window, cx).placeholder("password").masked(true));
+        let password_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("password").masked(true));
         let database_input = cx.new(|cx| InputState::new(window, cx).placeholder("mydb"));
 
         Self {
             focus_handle: cx.focus_handle(),
+            db_type,
+            uri_input,
             name_input,
             host_input,
             port_input,
             user_input,
             password_input,
+            password_visible: false,
+            pending_mask_toggle: false,
             database_input,
             status: ConnectionStatus::Idle,
             saved_connections: saved,
             pending_load: None,
+            pending_port_change: None,
+            pending_uri_parse: None,
         }
+    }
+
+    fn set_db_type(&mut self, new_type: DbType, cx: &mut Context<Self>) {
+        if self.db_type == new_type {
+            return;
+        }
+        let old_default = self.db_type.default_port();
+        self.db_type = new_type;
+        let new_default = new_type.default_port();
+
+        // Auto-switch port if it matches the old default
+        let current_port: u16 = self
+            .port_input
+            .read(cx)
+            .value()
+            .parse()
+            .unwrap_or(old_default);
+        if current_port == old_default {
+            // Store as pending so it gets applied in render() where we have window
+            self.pending_port_change = Some(new_default.to_string());
+        }
+        cx.notify();
+    }
+
+    fn parse_uri(&mut self, cx: &mut Context<Self>) {
+        let raw = self.uri_input.read(cx).value().to_string();
+        if raw.trim().is_empty() {
+            return;
+        }
+
+        let parsed = match url::Url::parse(&raw) {
+            Ok(u) => u,
+            Err(_) => {
+                self.status = ConnectionStatus::Error("Invalid URI format".to_string());
+                cx.notify();
+                return;
+            }
+        };
+
+        let host = parsed.host_str().unwrap_or("127.0.0.1").to_string();
+        let port = parsed
+            .port()
+            .unwrap_or(self.db_type.default_port())
+            .to_string();
+        let user = parsed.username().to_string();
+        let password = parsed.password().unwrap_or("").to_string();
+        let database = parsed.path().trim_start_matches('/').to_string();
+
+        // Auto-detect db type from scheme
+        match parsed.scheme() {
+            "mysql" => {
+                if self.db_type != DbType::MySQL {
+                    self.db_type = DbType::MySQL;
+                }
+            }
+            "postgres" | "postgresql" => {
+                if self.db_type != DbType::PostgreSQL {
+                    self.db_type = DbType::PostgreSQL;
+                }
+            }
+            _ => {}
+        }
+
+        self.pending_uri_parse = Some(ParsedUri {
+            host,
+            port,
+            user,
+            password,
+            database,
+        });
+        self.status = ConnectionStatus::Idle;
+        cx.notify();
+    }
+
+    fn toggle_password_visibility(&mut self, cx: &mut Context<Self>) {
+        self.password_visible = !self.password_visible;
+        self.pending_mask_toggle = true;
+        cx.notify();
     }
 
     fn build_config(&self, cx: &App) -> ConnectionConfig {
         ConnectionConfig::new(
+            self.db_type,
             self.name_input.read(cx).value().to_string(),
             self.host_input.read(cx).value().to_string(),
             self.port_input
                 .read(cx)
                 .value()
                 .parse::<u16>()
-                .unwrap_or(3306),
+                .unwrap_or(self.db_type.default_port()),
             self.user_input.read(cx).value().to_string(),
             self.database_input.read(cx).value().to_string(),
         )
@@ -121,6 +225,7 @@ impl ConnectionDialog {
     }
 
     fn load_saved_connection(&mut self, config: &ConnectionConfig, cx: &mut Context<Self>) {
+        self.db_type = config.db_type;
         self.pending_load = Some(config.clone());
         cx.notify();
     }
@@ -131,8 +236,9 @@ impl ConnectionDialog {
                 .update(cx, |input, cx| input.set_value(&config.name, window, cx));
             self.host_input
                 .update(cx, |input, cx| input.set_value(&config.host, window, cx));
-            self.port_input
-                .update(cx, |input, cx| input.set_value(&config.port.to_string(), window, cx));
+            self.port_input.update(cx, |input, cx| {
+                input.set_value(&config.port.to_string(), window, cx)
+            });
             self.user_input
                 .update(cx, |input, cx| input.set_value(&config.user, window, cx));
             self.database_input
@@ -141,6 +247,36 @@ impl ConnectionDialog {
             if let Some(pw) = crate::connection::store::load_password(&config.id) {
                 self.password_input
                     .update(cx, |input, cx| input.set_value(&pw, window, cx));
+            }
+        }
+
+        // Apply pending port change from db_type switch
+        if let Some(port) = self.pending_port_change.take() {
+            self.port_input
+                .update(cx, |input, cx| input.set_value(&port, window, cx));
+        }
+
+        // Apply password mask toggle
+        if self.pending_mask_toggle {
+            self.pending_mask_toggle = false;
+            let masked = !self.password_visible;
+            self.password_input
+                .update(cx, |input, cx| input.set_masked(masked, window, cx));
+        }
+
+        // Apply parsed URI fields
+        if let Some(parsed) = self.pending_uri_parse.take() {
+            self.host_input
+                .update(cx, |input, cx| input.set_value(&parsed.host, window, cx));
+            self.port_input
+                .update(cx, |input, cx| input.set_value(&parsed.port, window, cx));
+            self.user_input
+                .update(cx, |input, cx| input.set_value(&parsed.user, window, cx));
+            self.password_input
+                .update(cx, |input, cx| input.set_value(&parsed.password, window, cx));
+            if !parsed.database.is_empty() {
+                self.database_input
+                    .update(cx, |input, cx| input.set_value(&parsed.database, window, cx));
             }
         }
     }
@@ -183,7 +319,15 @@ impl Render for ConnectionDialog {
             ConnectionStatus::Idle => String::new(),
             ConnectionStatus::Connecting => "Connecting...".to_string(),
             ConnectionStatus::Connected => "Connected!".to_string(),
-            ConnectionStatus::Error(e) => format!("Error: {}", e),
+            ConnectionStatus::Error(e) => {
+                let msg = format!("Error: {}", e);
+                // Cap at 200 chars to avoid layout overflow
+                if msg.len() > 200 {
+                    format!("{}...", &msg[..200])
+                } else {
+                    msg
+                }
+            }
         };
         let status_color = match &self.status {
             ConnectionStatus::Error(_) => theme.danger,
@@ -196,6 +340,7 @@ impl Render for ConnectionDialog {
         let border_color = theme.border;
         let text_color = theme.foreground;
         let muted = theme.muted_foreground;
+        let current_db_type = self.db_type;
 
         // Saved connections sidebar
         let saved = self.saved_connections.clone();
@@ -213,8 +358,8 @@ impl Render for ConnectionDialog {
                 div()
                     .flex()
                     .flex_row()
-                    .w(px(640.))
-                    .h(px(460.))
+                    .w(px(720.))
+                    .max_h(px(640.))
                     .bg(surface)
                     .border_1()
                     .border_color(border_color)
@@ -257,17 +402,107 @@ impl Render for ConnectionDialog {
                     // Connection form
                     .child(
                         div()
+                            .id("connection-form")
                             .flex()
                             .flex_col()
                             .flex_1()
+                            .overflow_y_scroll()
                             .p_4()
                             .child(
                                 div()
-                                    .text_size(px(16.))
-                                    .text_color(text_color)
-                                    .font_weight(FontWeight::BOLD)
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
                                     .mb_4()
-                                    .child("New Connection"),
+                                    .child(
+                                        div()
+                                            .text_size(px(16.))
+                                            .text_color(text_color)
+                                            .font_weight(FontWeight::BOLD)
+                                            .child("New Connection"),
+                                    )
+                                    .child(
+                                        Button::new("close-dialog-btn")
+                                            .ghost()
+                                            .compact()
+                                            .label("X")
+                                            .on_click(cx.listener(|_this, _, _window, cx| {
+                                                cx.emit(ConnectionEvent::Cancelled);
+                                            })),
+                                    ),
+                            )
+                            // Database type toggle
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_1()
+                                    .mb_3()
+                                    .child(
+                                        Button::new("db-type-mysql")
+                                            .label("MySQL")
+                                            .compact()
+                                            .when(current_db_type == DbType::MySQL, |btn| {
+                                                btn.primary()
+                                            })
+                                            .when(current_db_type != DbType::MySQL, |btn| {
+                                                btn.ghost()
+                                            })
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.set_db_type(DbType::MySQL, cx);
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("db-type-postgres")
+                                            .label("PostgreSQL")
+                                            .compact()
+                                            .when(
+                                                current_db_type == DbType::PostgreSQL,
+                                                |btn| btn.primary(),
+                                            )
+                                            .when(
+                                                current_db_type != DbType::PostgreSQL,
+                                                |btn| btn.ghost(),
+                                            )
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.set_db_type(DbType::PostgreSQL, cx);
+                                            })),
+                                    ),
+                            )
+                            // URI paste field
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .mb_2()
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(muted)
+                                            .child("Connection URI"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .gap_1()
+                                            .child(
+                                                div().flex_1().child(Input::new(&self.uri_input)),
+                                            )
+                                            .child(
+                                                Button::new("parse-uri-btn")
+                                                    .ghost()
+                                                    .compact()
+                                                    .label("Parse")
+                                                    .on_click(cx.listener(
+                                                        |this, _, _window, cx| {
+                                                            this.parse_uri(cx);
+                                                        },
+                                                    )),
+                                            ),
+                                    ),
                             )
                             .child(Self::render_field(
                                 "Connection Name",
@@ -299,11 +534,45 @@ impl Render for ConnectionDialog {
                                 &self.user_input,
                                 muted,
                             ))
-                            .child(Self::render_field(
-                                "Password",
-                                &self.password_input,
-                                muted,
-                            ))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .mb_2()
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(muted)
+                                            .child("Password"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .child(Input::new(&self.password_input)),
+                                            )
+                                            .child(
+                                                Button::new("toggle-pw-btn")
+                                                    .ghost()
+                                                    .compact()
+                                                    .label(if self.password_visible {
+                                                        "Hide"
+                                                    } else {
+                                                        "Show"
+                                                    })
+                                                    .on_click(cx.listener(
+                                                        |this, _, _window, cx| {
+                                                            this.toggle_password_visibility(cx);
+                                                        },
+                                                    )),
+                                            ),
+                                    ),
+                            )
                             .child(Self::render_field(
                                 "Database",
                                 &self.database_input,
@@ -313,7 +582,9 @@ impl Render for ConnectionDialog {
                             .when(!status_text.is_empty(), |el| {
                                 el.child(
                                     div()
-                                        .text_size(px(12.))
+                                        .w_full()
+                                        .whitespace_normal()
+                                        .text_size(px(11.))
                                         .text_color(status_color)
                                         .mb_2()
                                         .child(status_text),
@@ -338,7 +609,11 @@ impl Render for ConnectionDialog {
                                     .child(
                                         Button::new("connect-btn")
                                             .primary()
-                                            .label(if is_connecting { "Connecting..." } else { "Connect" })
+                                            .label(if is_connecting {
+                                                "Connecting..."
+                                            } else {
+                                                "Connect"
+                                            })
                                             .disabled(is_connecting)
                                             .on_click(cx.listener(|this, _, _window, cx| {
                                                 this.connect(cx);

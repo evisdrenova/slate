@@ -43,10 +43,11 @@ impl LlmProvider {
         &self,
         messages: &[ChatMessage],
         schema_context: Option<&str>,
+        db_type_label: Option<&str>,
     ) -> Result<String> {
         match self.backend {
-            LlmBackend::Anthropic => self.send_anthropic(messages, schema_context),
-            LlmBackend::OpenAI => self.send_openai(messages, schema_context),
+            LlmBackend::Anthropic => self.send_anthropic(messages, schema_context, db_type_label),
+            LlmBackend::OpenAI => self.send_openai(messages, schema_context, db_type_label),
         }
     }
 
@@ -54,14 +55,19 @@ impl LlmProvider {
         &self,
         messages: &[ChatMessage],
         schema_context: Option<&str>,
+        db_type_label: Option<&str>,
     ) -> Result<String> {
+        let dialect = db_type_label.unwrap_or("SQL");
         let system = if let Some(schema) = schema_context {
             format!(
-                "You are a helpful SQL assistant. The user has connected to a MySQL database with the following schema:\n\n{}\n\nHelp them write SQL queries, explain results, and answer questions about their data. When generating SQL, always output it in a code block.",
-                schema
+                "You are a helpful SQL assistant. The user has connected to a {} database with the following schema:\n\n{}\n\nHelp them write {} queries, explain results, and answer questions about their data. When generating SQL, always output it in a code block.",
+                dialect, schema, dialect
             )
         } else {
-            "You are a helpful SQL assistant. Help users write MySQL queries and explain database concepts. When generating SQL, always output it in a code block.".to_string()
+            format!(
+                "You are a helpful SQL assistant. Help users write {} queries and explain database concepts. When generating SQL, always output it in a code block.",
+                dialect
+            )
         };
 
         let api_messages: Vec<serde_json::Value> = messages
@@ -111,14 +117,19 @@ impl LlmProvider {
         &self,
         messages: &[ChatMessage],
         schema_context: Option<&str>,
+        db_type_label: Option<&str>,
     ) -> Result<String> {
+        let dialect = db_type_label.unwrap_or("SQL");
         let system_msg = if let Some(schema) = schema_context {
             format!(
-                "You are a helpful SQL assistant. The user has connected to a MySQL database with the following schema:\n\n{}\n\nHelp them write SQL queries, explain results, and answer questions about their data. When generating SQL, always output it in a code block.",
-                schema
+                "You are a helpful SQL assistant. The user has connected to a {} database with the following schema:\n\n{}\n\nHelp them write {} queries, explain results, and answer questions about their data. When generating SQL, always output it in a code block.",
+                dialect, schema, dialect
             )
         } else {
-            "You are a helpful SQL assistant. Help users write MySQL queries and explain database concepts. When generating SQL, always output it in a code block.".to_string()
+            format!(
+                "You are a helpful SQL assistant. Help users write {} queries and explain database concepts. When generating SQL, always output it in a code block.",
+                dialect
+            )
         };
 
         let mut api_messages = vec![serde_json::json!({

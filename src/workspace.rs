@@ -9,7 +9,7 @@ use crate::ai::sidebar::{AiEvent, AiSidebar};
 use crate::connection::dialog::{ConnectionDialog, ConnectionEvent};
 use crate::db::connection::DatabaseService;
 use crate::db::schema;
-use crate::db::types::ConnectionConfig;
+use crate::db::types::{ConnectionConfig, DbType};
 use crate::editor::query_editor::{QueryEditor, QueryEvent};
 use crate::grid::results_grid::ResultsGrid;
 use crate::schema::explorer::{SchemaEvent, SchemaExplorer};
@@ -19,6 +19,7 @@ actions!(workspace, [ToggleAiSidebar, ShowConnectionDialog]);
 pub struct Workspace {
     focus_handle: FocusHandle,
     db: Option<Arc<DatabaseService>>,
+    db_type: DbType,
     connection_config: Option<ConnectionConfig>,
     schema_explorer: Entity<SchemaExplorer>,
     query_editor: Entity<QueryEditor>,
@@ -40,7 +41,8 @@ impl Workspace {
         cx.subscribe(&schema_explorer, |this: &mut Self, _, event: &SchemaEvent, cx| {
             match event {
                 SchemaEvent::TableSelected(table) => {
-                    let sql = format!("SELECT * FROM `{}` LIMIT 100", table);
+                    let quoted = this.db_type.quote_identifier(table);
+                    let sql = format!("SELECT * FROM {} LIMIT 100", quoted);
                     this.query_editor.update(cx, |editor, cx| {
                         editor.set_sql(&sql, cx);
                         editor.execute(cx);
@@ -87,6 +89,7 @@ impl Workspace {
                 match event {
                     ConnectionEvent::Connected(db, config) => {
                         this.db = Some(db.clone());
+                        this.db_type = config.db_type;
                         this.connection_config = Some(config.clone());
                         this.connection_dialog = None;
 
@@ -100,6 +103,12 @@ impl Workspace {
                         let database = config.database.clone();
                         this.schema_explorer.update(cx, |explorer, cx| {
                             explorer.load_schema(db_clone.clone(), database, cx);
+                        });
+
+                        // Pass db_type to AI sidebar
+                        let db_type = config.db_type;
+                        this.ai_sidebar.update(cx, |sidebar, _cx| {
+                            sidebar.set_db_type(db_type);
                         });
 
                         // Load schema for AI sidebar too
@@ -137,6 +146,7 @@ impl Workspace {
         Self {
             focus_handle: cx.focus_handle(),
             db: None,
+            db_type: DbType::MySQL,
             connection_config: None,
             schema_explorer,
             query_editor,
@@ -168,6 +178,7 @@ impl Workspace {
             match event {
                 ConnectionEvent::Connected(db, config) => {
                     this.db = Some(db.clone());
+                    this.db_type = config.db_type;
                     this.connection_config = Some(config.clone());
                     this.connection_dialog = None;
 
@@ -179,6 +190,12 @@ impl Workspace {
                     let database = config.database.clone();
                     this.schema_explorer.update(cx, |explorer, cx| {
                         explorer.load_schema(db_clone, database, cx);
+                    });
+
+                    // Pass db_type to AI sidebar
+                    let db_type = config.db_type;
+                    this.ai_sidebar.update(cx, |sidebar, _cx| {
+                        sidebar.set_db_type(db_type);
                     });
 
                     cx.notify();

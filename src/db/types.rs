@@ -1,6 +1,41 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DbType {
+    MySQL,
+    PostgreSQL,
+}
+
+impl Default for DbType {
+    fn default() -> Self {
+        DbType::MySQL
+    }
+}
+
+impl DbType {
+    pub fn default_port(self) -> u16 {
+        match self {
+            DbType::MySQL => 3306,
+            DbType::PostgreSQL => 5432,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DbType::MySQL => "MySQL",
+            DbType::PostgreSQL => "PostgreSQL",
+        }
+    }
+
+    pub fn quote_identifier(self, name: &str) -> String {
+        match self {
+            DbType::MySQL => format!("`{}`", name),
+            DbType::PostgreSQL => format!("\"{}\"", name),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionConfig {
     pub id: String,
@@ -9,12 +44,22 @@ pub struct ConnectionConfig {
     pub port: u16,
     pub user: String,
     pub database: String,
+    #[serde(default)]
+    pub db_type: DbType,
 }
 
 impl ConnectionConfig {
-    pub fn new(name: String, host: String, port: u16, user: String, database: String) -> Self {
+    pub fn new(
+        db_type: DbType,
+        name: String,
+        host: String,
+        port: u16,
+        user: String,
+        database: String,
+    ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
+            db_type,
             name,
             host,
             port,
