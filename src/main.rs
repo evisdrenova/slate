@@ -1,30 +1,25 @@
+mod ai;
+mod connection;
+mod db;
+mod editor;
+mod grid;
+mod schema;
+mod workspace;
+
 use gpui::*;
- 
-struct HelloWorld {
-    text: SharedString,
-}
- 
-impl Render for HelloWorld {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .bg(rgb(0x2e7d32))
-            .size_full()
-            .justify_center()
-            .items_center()
-            .text_xl()
-            .text_color(rgb(0xffffff))
-            .child(format!("Hello, {}!", &self.text))
-    }
-}
+use gpui_component::Root;
+use workspace::Workspace;
 
 fn main() {
-    gpui_platform::application().run(|cx: &mut App| {
-        cx.open_window(WindowOptions::default(), |_, cx| {
-            cx.new(|_cx| HelloWorld {
-                text: "World".into(),
+    Application::new()
+        .with_assets(gpui_component_assets::Assets)
+        .run(move |cx: &mut App| {
+            gpui_component::init(cx);
+            cx.open_window(WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| Workspace::new(window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
             })
-        })
-        .unwrap();
-    });
+            .unwrap();
+            cx.activate(true);
+        });
 }
