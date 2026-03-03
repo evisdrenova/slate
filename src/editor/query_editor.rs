@@ -4,10 +4,11 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
-use gpui_component::{ActiveTheme, Disableable};
+use gpui_component::{ActiveTheme, Disableable, Icon, IconName};
 
 use crate::db::connection::DatabaseService;
 use crate::db::types::QueryResult;
+use super::saved_queries::{self, SavedQuery};
 
 actions!(query_editor, [ExecuteQuery]);
 
@@ -33,6 +34,8 @@ pub struct QueryEditor {
     tabs: Vec<QueryTab>,
     active_tab: usize,
     next_tab_id: usize,
+    saved_queries: Vec<SavedQuery>,
+    show_saved: bool,
 }
 
 impl QueryEditor {
@@ -55,6 +58,8 @@ impl QueryEditor {
             }],
             active_tab: 0,
             next_tab_id: 2,
+            saved_queries: saved_queries::load_queries(),
+            show_saved: false,
         }
     }
 
@@ -294,7 +299,7 @@ impl Render for QueryEditor {
                 div()
                     .flex_1()
                     .overflow_hidden()
-                    .child(Input::new(&self.sql_input).h_full()),
+                    .child(Input::new(&self.sql_input).h_full().rounded_none()),
             )
             // Toolbar
             .child(
@@ -308,17 +313,6 @@ impl Render for QueryEditor {
                     .border_t_1()
                     .border_color(border_color)
                     .bg(bg)
-                    .child(
-                        Button::new("execute-btn")
-                            .primary()
-                            .compact()
-                            .label(if is_executing { "Running..." } else { "Execute" })
-                            .disabled(!has_db || is_executing)
-                            .loading(is_executing)
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.execute(cx);
-                            })),
-                    )
                     .when_some(error, |el, err| {
                         el.child(
                             div()
@@ -329,7 +323,21 @@ impl Render for QueryEditor {
                                 .max_w(px(400.))
                                 .child(err),
                         )
-                    }),
+                    })
+                    .child(
+                        div().flex_1()
+                    )
+                    .child(
+                        Button::new("execute-btn")
+                            .primary()
+                            .compact()
+                            .label(if is_executing { "Running..." } else { "Execute" })
+                            .disabled(!has_db || is_executing)
+                            .loading(is_executing)
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.execute(cx);
+                            })),
+                    ),
             )
     }
 }

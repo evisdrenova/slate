@@ -4,7 +4,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::theme::{Theme, ThemeMode};
-use gpui_component::ActiveTheme;
+use gpui_component::{ActiveTheme, Icon, IconName};
 
 use crate::ai::sidebar::{AiEvent, AiSidebar};
 use crate::connection::dialog::{ConnectionDialog, ConnectionEvent};
@@ -17,6 +17,18 @@ use crate::schema::explorer::{SchemaEvent, SchemaExplorer};
 
 actions!(workspace, [ToggleAiSidebar, ShowConnectionDialog]);
 
+struct PanelResize {
+    panel: PanelSide,
+    start_x: Pixels,
+    original_width: Pixels,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum PanelSide {
+    Left,
+    Right,
+}
+
 pub struct Workspace {
     focus_handle: FocusHandle,
     db: Option<Arc<DatabaseService>>,
@@ -28,6 +40,9 @@ pub struct Workspace {
     ai_sidebar: Entity<AiSidebar>,
     connection_dialog: Option<Entity<ConnectionDialog>>,
     ai_visible: bool,
+    left_panel_width: Pixels,
+    right_panel_width: Pixels,
+    panel_resize: Option<PanelResize>,
 }
 
 impl Workspace {
@@ -155,6 +170,9 @@ impl Workspace {
             ai_sidebar,
             connection_dialog,
             ai_visible: false,
+            left_panel_width: px(260.),
+            right_panel_width: px(300.),
+            panel_resize: None,
         }
     }
 
@@ -238,12 +256,16 @@ impl Render for Workspace {
         let border_color = theme.border;
         let text_color = theme.foreground;
         let _muted = theme.muted_foreground;
-        let _accent = theme.primary;
+        let accent = theme.primary;
 
         let status = self.connection_status(cx);
         let is_connected = self.db.is_some();
         let ai_visible = self.ai_visible;
         let is_dark = theme.mode.is_dark();
+        let left_w = self.left_panel_width;
+        let right_w = self.right_panel_width;
+        let is_resizing = self.panel_resize.is_some();
+        let resize_hover = Hsla { a: 0.5, ..accent };
 
         div()
             .flex()
@@ -257,6 +279,39 @@ impl Render for Workspace {
             .track_focus(&self.focus_handle(cx))
             .on_action(cx.listener(Self::toggle_ai_sidebar))
             .on_action(cx.listener(Self::show_connection_dialog))
+            // Global mouse tracking for panel resize
+            .when(is_resizing, |el| el.cursor_col_resize())
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if let Some(ref resize) = this.panel_resize {
+                    if event.pressed_button != Some(MouseButton::Left) {
+                        this.panel_resize = None;
+                        cx.notify();
+                        return;
+                    }
+                    let delta = event.position.x - resize.start_x;
+                    match resize.panel {
+                        PanelSide::Left => {
+                            this.left_panel_width =
+                                (resize.original_width + delta).max(px(150.)).min(px(500.));
+                        }
+                        PanelSide::Right => {
+                            // Right panel: dragging left increases width
+                            this.right_panel_width =
+                                (resize.original_width - delta).max(px(200.)).min(px(600.));
+                        }
+                    }
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    if this.panel_resize.is_some() {
+                        this.panel_resize = None;
+                        cx.notify();
+                    }
+                }),
+            )
             // Title bar
             .child(
                 div()
@@ -284,7 +339,8 @@ impl Render for Workspace {
                                 Button::new("reconnect-btn")
                                     .ghost()
                                     .compact()
-                                    .label(if is_connected { "Switch DB" } else { "Connect" })
+                                    .icon(Icon::new(IconName::Settings2))
+                                    .tooltip(if is_connected { "Switch DB" } else { "Connect" })
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.show_connection_dialog(
                                             &ShowConnectionDialog,
@@ -297,7 +353,12 @@ impl Render for Workspace {
                                 Button::new("theme-toggle-btn")
                                     .ghost()
                                     .compact()
-                                    .label(if is_dark { "Light" } else { "Dark" })
+                                    .icon(Icon::new(if is_dark {
+                                        IconName::Sun
+                                    } else {
+                                        IconName::Moon
+                                    }))
+                                    .tooltip(if is_dark { "Light mode" } else { "Dark mode" })
                                     .on_click(|_, window, cx| {
                                         let new_mode = if cx.theme().mode.is_dark() {
                                             ThemeMode::Light
@@ -312,7 +373,8 @@ impl Render for Workspace {
                                     .compact()
                                     .when(ai_visible, |btn| btn.primary())
                                     .when(!ai_visible, |btn| btn.ghost())
-                                    .label("AI")
+                                    .icon(Icon::new(IconName::Bot))
+                                    .tooltip("AI Assistant")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.toggle_ai_sidebar(
                                             &ToggleAiSidebar,
@@ -330,8 +392,40 @@ impl Render for Workspace {
                     .flex_row()
                     .flex_1()
                     .overflow_hidden()
-                    // Left sidebar - Schema Explorer
-                    .child(self.schema_explorer.clone())
+                    // Left sidebar - Schema Explorer (resizable)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_shrink_0()
+                            .w(left_w)
+                            .h_full()
+                            .border_r_1()
+                            .border_color(border_color)
+                            .child(self.schema_explorer.clone())
+                            // Left panel drag handle
+                            .child(
+                                div()
+                                    .id("left-resize-handle")
+                                    .w(px(4.))
+                                    .h_full()
+                                    .flex_shrink_0()
+                                    .cursor_col_resize()
+                                    .hover(|el| el.bg(resize_hover))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(
+                                            |this, event: &MouseDownEvent, _window, _cx| {
+                                                this.panel_resize = Some(PanelResize {
+                                                    panel: PanelSide::Left,
+                                                    start_x: event.position.x,
+                                                    original_width: this.left_panel_width,
+                                                });
+                                            },
+                                        ),
+                                    ),
+                            ),
+                    )
                     // Center - Query Editor + Results Grid
                     .child(
                         div()
@@ -342,8 +436,42 @@ impl Render for Workspace {
                             .child(self.query_editor.clone())
                             .child(self.results_grid.clone()),
                     )
-                    // Right sidebar - AI (conditional)
-                    .when(ai_visible, |el| el.child(self.ai_sidebar.clone())),
+                    // Right sidebar - AI (conditional, resizable)
+                    .when(ai_visible, |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_shrink_0()
+                                .w(right_w)
+                                .h_full()
+                                .border_l_1()
+                                .border_color(border_color)
+                                // Right panel drag handle
+                                .child(
+                                    div()
+                                        .id("right-resize-handle")
+                                        .w(px(4.))
+                                        .h_full()
+                                        .flex_shrink_0()
+                                        .cursor_col_resize()
+                                        .hover(|el| el.bg(resize_hover))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(
+                                                |this, event: &MouseDownEvent, _window, _cx| {
+                                                    this.panel_resize = Some(PanelResize {
+                                                        panel: PanelSide::Right,
+                                                        start_x: event.position.x,
+                                                        original_width: this.right_panel_width,
+                                                    });
+                                                },
+                                            ),
+                                        ),
+                                )
+                                .child(self.ai_sidebar.clone()),
+                        )
+                    }),
             )
             // Connection dialog overlay
             .when_some(self.connection_dialog.clone(), |el, dialog| {

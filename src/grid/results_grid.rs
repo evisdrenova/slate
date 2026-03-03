@@ -71,7 +71,7 @@ impl ResultsGrid {
         let is_even = row_idx % 2 == 0;
         let row_bg = if is_even { bg } else { surface };
 
-        let mut row_div = div().flex().flex_row().h(px(24.)).bg(row_bg);
+        let mut row_div = div().flex().flex_row().h(px(24.)).bg(row_bg).w_full();
 
         // Row number
         row_div = row_div.child(
@@ -124,6 +124,9 @@ impl ResultsGrid {
             );
         }
 
+        // Trailing spacer fills remaining width
+        row_div = row_div.child(div().flex_1().h_full().border_b_1().border_color(border_color));
+
         row_div
     }
 }
@@ -168,6 +171,7 @@ impl Render for ResultsGrid {
             .flex()
             .flex_row()
             .flex_shrink_0()
+            .w_full()
             .h(px(28.))
             .bg(surface)
             .border_b_1()
@@ -245,6 +249,9 @@ impl Render for ResultsGrid {
                     ),
             );
         }
+
+        // Trailing spacer fills remaining header width
+        header = header.child(div().flex_1().h_full());
 
         div()
             .flex()

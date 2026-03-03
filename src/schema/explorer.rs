@@ -4,7 +4,7 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::input::{Input, InputState};
-use gpui_component::ActiveTheme;
+use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 
 use crate::db::connection::DatabaseService;
 use crate::db::schema::{self, DatabaseSchema};
@@ -218,30 +218,19 @@ fn build_row_container(depth: usize, line_color: Hsla) -> Div {
     container
 }
 
-/// Render the expand/collapse arrow indicator.
-fn arrow_icon(expanded: bool, color: Hsla) -> Div {
-    div()
-        .flex_shrink_0()
-        .w(px(16.))
-        .h(px(16.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(10.))
-        .text_color(color)
-        .child(if expanded { "▾" } else { "▸" })
+/// Render the expand/collapse chevron icon.
+fn chevron_icon(expanded: bool, color: Hsla) -> Icon {
+    let name = if expanded {
+        IconName::ChevronDown
+    } else {
+        IconName::ChevronRight
+    };
+    Icon::new(name).small().text_color(color)
 }
 
-/// Render a small dot indicator for leaf nodes.
-fn leaf_icon(color: Hsla) -> Div {
-    div()
-        .flex_shrink_0()
-        .w(px(16.))
-        .h(px(16.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(div().w(px(4.)).h(px(4.)).rounded_full().bg(color))
+/// Render the appropriate node-type icon.
+fn node_icon(name: IconName, color: Hsla) -> Icon {
+    Icon::new(name).small().text_color(color)
 }
 
 impl Render for SchemaExplorer {
@@ -249,7 +238,7 @@ impl Render for SchemaExplorer {
         self.update_filter(cx);
 
         let theme = cx.theme();
-        let bg = theme.background;
+        let sidebar_bg = theme.secondary;
         let border_color = theme.border;
         let muted = theme.muted_foreground;
         let danger = theme.danger;
@@ -306,8 +295,12 @@ impl Render for SchemaExplorer {
                                                     cx.notify();
                                                 },
                                             ))
-                                            .child(arrow_icon(
+                                            .child(chevron_icon(
                                                 expanded, muted_color,
+                                            ))
+                                            .child(node_icon(
+                                                IconName::Building2,
+                                                text_color,
                                             ))
                                             .child(
                                                 div()
@@ -324,6 +317,11 @@ impl Render for SchemaExplorer {
                                 }
                                 TreeRow::Database(name) => {
                                     let expanded = this.database_expanded;
+                                    let folder_icon = if expanded {
+                                        IconName::FolderOpen
+                                    } else {
+                                        IconName::FolderClosed
+                                    };
                                     build_row_container(depth, line_color).child(
                                         div()
                                             .id(("tree-row", ix))
@@ -346,8 +344,12 @@ impl Render for SchemaExplorer {
                                                     cx.notify();
                                                 },
                                             ))
-                                            .child(arrow_icon(
+                                            .child(chevron_icon(
                                                 expanded, muted_color,
+                                            ))
+                                            .child(node_icon(
+                                                folder_icon,
+                                                text_color,
                                             ))
                                             .child(
                                                 div()
@@ -408,8 +410,12 @@ impl Render for SchemaExplorer {
                                                     },
                                                 ),
                                             )
-                                            .child(arrow_icon(
+                                            .child(chevron_icon(
                                                 expanded, muted_color,
+                                            ))
+                                            .child(node_icon(
+                                                IconName::LayoutDashboard,
+                                                muted_color,
                                             ))
                                             .child(
                                                 div()
@@ -444,7 +450,10 @@ impl Render for SchemaExplorer {
                                             .rounded(px(6.))
                                             .text_size(px(12.))
                                             .hover(|s| s.bg(hover_bg))
-                                            .child(leaf_icon(dot_color))
+                                            .child(node_icon(
+                                                IconName::File,
+                                                dot_color,
+                                            ))
                                             .child(
                                                 div()
                                                     .flex_1()
@@ -492,7 +501,10 @@ impl Render for SchemaExplorer {
                                             .text_size(px(11.))
                                             .text_color(muted_color)
                                             .font_weight(FontWeight::MEDIUM)
-                                            .child(leaf_icon(dot_color))
+                                            .child(node_icon(
+                                                IconName::Search,
+                                                muted_color,
+                                            ))
                                             .child("Indexes"),
                                     )
                                 }
@@ -523,7 +535,10 @@ impl Render for SchemaExplorer {
                                             .text_color(muted_color)
                                             .overflow_x_hidden()
                                             .hover(|s| s.bg(hover_bg))
-                                            .child(leaf_icon(dot_color))
+                                            .child(node_icon(
+                                                IconName::Search,
+                                                dot_color,
+                                            ))
                                             .child(format!(
                                                 "{}{} ({})",
                                                 name, u, cols
@@ -541,10 +556,9 @@ impl Render for SchemaExplorer {
         div()
             .flex()
             .flex_col()
-            .w(px(260.))
+            .flex_1()
             .h_full()
-            .bg(bg)
-            .border_r_1()
+            .bg(sidebar_bg)
             .border_color(border_color)
             // Header
             .child(

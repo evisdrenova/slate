@@ -178,10 +178,9 @@ impl Render for AiSidebar {
         div()
             .flex()
             .flex_col()
-            .w(px(300.))
+            .flex_1()
             .h_full()
             .bg(bg)
-            .border_l_1()
             .border_color(border_color)
             // Header
             .child(
