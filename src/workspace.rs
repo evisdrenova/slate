@@ -100,9 +100,9 @@ impl Workspace {
 
                         // Load schema
                         let db_clone = db.clone();
-                        let database = config.database.clone();
+                        let config_clone = config.clone();
                         this.schema_explorer.update(cx, |explorer, cx| {
-                            explorer.load_schema(db_clone.clone(), database, cx);
+                            explorer.load_schema(db_clone.clone(), &config_clone, cx);
                         });
 
                         // Pass db_type to AI sidebar
@@ -187,9 +187,9 @@ impl Workspace {
                     });
 
                     let db_clone = db.clone();
-                    let database = config.database.clone();
+                    let config_clone = config.clone();
                     this.schema_explorer.update(cx, |explorer, cx| {
-                        explorer.load_schema(db_clone, database, cx);
+                        explorer.load_schema(db_clone, &config_clone, cx);
                     });
 
                     // Pass db_type to AI sidebar
