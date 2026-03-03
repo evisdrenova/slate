@@ -3,6 +3,7 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::theme::{Theme, ThemeMode};
 use gpui_component::ActiveTheme;
 
 use crate::ai::sidebar::{AiEvent, AiSidebar};
@@ -242,6 +243,7 @@ impl Render for Workspace {
         let status = self.connection_status(cx);
         let is_connected = self.db.is_some();
         let ai_visible = self.ai_visible;
+        let is_dark = theme.mode.is_dark();
 
         div()
             .flex()
@@ -290,6 +292,20 @@ impl Render for Workspace {
                                             cx,
                                         );
                                     })),
+                            )
+                            .child(
+                                Button::new("theme-toggle-btn")
+                                    .ghost()
+                                    .compact()
+                                    .label(if is_dark { "Light" } else { "Dark" })
+                                    .on_click(|_, window, cx| {
+                                        let new_mode = if cx.theme().mode.is_dark() {
+                                            ThemeMode::Light
+                                        } else {
+                                            ThemeMode::Dark
+                                        };
+                                        Theme::change(new_mode, Some(window), cx);
+                                    }),
                             )
                             .child(
                                 Button::new("ai-toggle-btn")
