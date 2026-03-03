@@ -10,6 +10,11 @@ use crate::db::connection::DatabaseService;
 use crate::db::schema::{self, DatabaseSchema};
 use crate::db::types::ConnectionConfig;
 
+// Tree layout constants
+const INDENT_BASE: f32 = 8.0;
+const INDENT_STEP: f32 = 16.0;
+const LINE_OFFSET: f32 = 7.0;
+
 #[derive(Clone)]
 pub enum SchemaEvent {
     TableSelected(String),
@@ -23,6 +28,18 @@ enum TreeRow {
     Column(String, String, String, bool, bool), // table, name, type, nullable, pk
     IndexHeader(String),
     Index(String, String, String, bool), // table, name, cols_str, unique
+}
+
+impl TreeRow {
+    fn depth(&self) -> usize {
+        match self {
+            TreeRow::Connection(_) => 0,
+            TreeRow::Database(_) => 1,
+            TreeRow::Table(_) => 2,
+            TreeRow::Column(..) | TreeRow::IndexHeader(_) => 3,
+            TreeRow::Index(..) => 4,
+        }
+    }
 }
 
 pub struct SchemaExplorer {
@@ -183,6 +200,50 @@ impl Focusable for SchemaExplorer {
     }
 }
 
+/// Build a row container with vertical tree indicator lines at each ancestor depth.
+fn build_row_container(depth: usize, line_color: Hsla) -> Div {
+    let mut container = div().relative().w_full().flex().items_center();
+    for d in 0..depth {
+        let x = INDENT_BASE + d as f32 * INDENT_STEP + LINE_OFFSET;
+        container = container.child(
+            div()
+                .absolute()
+                .left(px(x))
+                .top_0()
+                .h_full()
+                .w(px(1.))
+                .bg(line_color),
+        );
+    }
+    container
+}
+
+/// Render the expand/collapse arrow indicator.
+fn arrow_icon(expanded: bool, color: Hsla) -> Div {
+    div()
+        .flex_shrink_0()
+        .w(px(16.))
+        .h(px(16.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(10.))
+        .text_color(color)
+        .child(if expanded { "▾" } else { "▸" })
+}
+
+/// Render a small dot indicator for leaf nodes.
+fn leaf_icon(color: Hsla) -> Div {
+    div()
+        .flex_shrink_0()
+        .w(px(16.))
+        .h(px(16.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(div().w(px(4.)).h(px(4.)).rounded_full().bg(color))
+}
+
 impl Render for SchemaExplorer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.update_filter(cx);
@@ -210,48 +271,95 @@ impl Render for SchemaExplorer {
                     let text_color = theme.foreground;
                     let muted_color = theme.muted_foreground;
                     let hover_bg = theme.secondary;
+                    let line_color = theme.border;
                     let pk_color: Hsla = gpui::rgb(0xf78c6c).into();
+                    let dot_color = Hsla { a: 0.35, ..muted_color };
 
                     range
                         .map(|ix| {
                             let row = &this.flattened_rows[ix];
+                            let depth = row.depth();
+                            let indent = INDENT_BASE + depth as f32 * INDENT_STEP;
+
                             match row {
                                 TreeRow::Connection(label) => {
                                     let expanded = this.connection_expanded;
-                                    render_expandable_row(
-                                        ix,
-                                        px(6.),
-                                        expanded,
-                                        label,
-                                        text_color,
-                                        muted_color,
-                                        hover_bg,
-                                        true,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.connection_expanded =
-                                                !this.connection_expanded;
-                                            this.rebuild_tree();
-                                            cx.notify();
-                                        }),
+                                    build_row_container(depth, line_color).child(
+                                        div()
+                                            .id(("tree-row", ix))
+                                            .ml(px(indent))
+                                            .mr_2()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(4.))
+                                            .px(px(4.))
+                                            .py(px(4.))
+                                            .rounded(px(6.))
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(hover_bg))
+                                            .on_click(cx.listener(
+                                                |this, _, _, cx| {
+                                                    this.connection_expanded =
+                                                        !this.connection_expanded;
+                                                    this.rebuild_tree();
+                                                    cx.notify();
+                                                },
+                                            ))
+                                            .child(arrow_icon(
+                                                expanded, muted_color,
+                                            ))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .overflow_x_hidden()
+                                                    .text_size(px(13.))
+                                                    .font_weight(
+                                                        FontWeight::MEDIUM,
+                                                    )
+                                                    .text_color(text_color)
+                                                    .child(label.clone()),
+                                            ),
                                     )
                                 }
                                 TreeRow::Database(name) => {
                                     let expanded = this.database_expanded;
-                                    render_expandable_row(
-                                        ix,
-                                        px(22.),
-                                        expanded,
-                                        name,
-                                        text_color,
-                                        muted_color,
-                                        hover_bg,
-                                        true,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.database_expanded =
-                                                !this.database_expanded;
-                                            this.rebuild_tree();
-                                            cx.notify();
-                                        }),
+                                    build_row_container(depth, line_color).child(
+                                        div()
+                                            .id(("tree-row", ix))
+                                            .ml(px(indent))
+                                            .mr_2()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(4.))
+                                            .px(px(4.))
+                                            .py(px(4.))
+                                            .rounded(px(6.))
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(hover_bg))
+                                            .on_click(cx.listener(
+                                                |this, _, _, cx| {
+                                                    this.database_expanded =
+                                                        !this.database_expanded;
+                                                    this.rebuild_tree();
+                                                    cx.notify();
+                                                },
+                                            ))
+                                            .child(arrow_icon(
+                                                expanded, muted_color,
+                                            ))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .overflow_x_hidden()
+                                                    .text_size(px(13.))
+                                                    .font_weight(
+                                                        FontWeight::MEDIUM,
+                                                    )
+                                                    .text_color(text_color)
+                                                    .child(name.clone()),
+                                            ),
                                     )
                                 }
                                 TreeRow::Table(name) => {
@@ -259,35 +367,58 @@ impl Render for SchemaExplorer {
                                         this.expanded_tables.contains(name);
                                     let name_toggle = name.clone();
                                     let name_select = name.clone();
-                                    render_expandable_row(
-                                        ix,
-                                        px(38.),
-                                        expanded,
-                                        name,
-                                        text_color,
-                                        muted_color,
-                                        hover_bg,
-                                        false,
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.toggle_table(
-                                                &name_toggle,
-                                                cx,
-                                            );
-                                        }),
-                                    )
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(
-                                            move |_this, event: &MouseDownEvent, _, cx| {
-                                                if event.click_count == 2 {
-                                                    cx.emit(
-                                                        SchemaEvent::TableSelected(
-                                                            name_select.clone(),
-                                                        ),
+                                    build_row_container(depth, line_color).child(
+                                        div()
+                                            .id(("tree-row", ix))
+                                            .ml(px(indent))
+                                            .mr_2()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(4.))
+                                            .px(px(4.))
+                                            .py(px(4.))
+                                            .rounded(px(6.))
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(hover_bg))
+                                            .on_click(cx.listener(
+                                                move |this, _, _, cx| {
+                                                    this.toggle_table(
+                                                        &name_toggle,
+                                                        cx,
                                                     );
-                                                }
-                                            },
-                                        ),
+                                                },
+                                            ))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(
+                                                    move |_this,
+                                                          event: &MouseDownEvent,
+                                                          _,
+                                                          cx| {
+                                                        if event.click_count
+                                                            == 2
+                                                        {
+                                                            cx.emit(
+                                                            SchemaEvent::TableSelected(
+                                                                name_select.clone(),
+                                                            ),
+                                                        );
+                                                        }
+                                                    },
+                                                ),
+                                            )
+                                            .child(arrow_icon(
+                                                expanded, muted_color,
+                                            ))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .overflow_x_hidden()
+                                                    .text_size(px(13.))
+                                                    .text_color(text_color)
+                                                    .child(name.clone()),
+                                            ),
                                     )
                                 }
                                 TreeRow::Column(
@@ -299,76 +430,105 @@ impl Render for SchemaExplorer {
                                 ) => {
                                     let null_str =
                                         if *is_nullable { "?" } else { "" };
-                                    div()
-                                        .id(("tree-row", ix))
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .h(px(22.))
-                                        .pl(px(54.))
-                                        .pr_2()
-                                        .gap(px(6.))
-                                        .text_size(px(12.))
-                                        .overflow_x_hidden()
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .overflow_x_hidden()
-                                                .text_color(text_color)
-                                                .child(name.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_shrink_0()
-                                                .text_color(muted_color)
-                                                .child(format!(
-                                                    "{}{}",
-                                                    data_type, null_str
-                                                )),
-                                        )
-                                        .when(*is_pk, |el| {
-                                            el.child(
+                                    build_row_container(depth, line_color).child(
+                                        div()
+                                            .id(("tree-row", ix))
+                                            .ml(px(indent))
+                                            .mr_2()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(4.))
+                                            .px(px(4.))
+                                            .py(px(3.))
+                                            .rounded(px(6.))
+                                            .text_size(px(12.))
+                                            .hover(|s| s.bg(hover_bg))
+                                            .child(leaf_icon(dot_color))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .overflow_x_hidden()
+                                                    .text_color(text_color)
+                                                    .child(name.clone()),
+                                            )
+                                            .child(
                                                 div()
                                                     .flex_shrink_0()
-                                                    .text_size(px(10.))
-                                                    .text_color(pk_color)
-                                                    .font_weight(
-                                                        FontWeight::SEMIBOLD,
-                                                    )
-                                                    .child("PK"),
+                                                    .text_color(muted_color)
+                                                    .text_size(px(11.))
+                                                    .child(format!(
+                                                        "{}{}",
+                                                        data_type,
+                                                        null_str
+                                                    )),
                                             )
-                                        })
+                                            .when(*is_pk, |el| {
+                                                el.child(
+                                                    div()
+                                                        .flex_shrink_0()
+                                                        .text_size(px(10.))
+                                                        .text_color(pk_color)
+                                                        .font_weight(
+                                                            FontWeight::SEMIBOLD,
+                                                        )
+                                                        .child("PK"),
+                                                )
+                                            }),
+                                    )
                                 }
-                                TreeRow::IndexHeader(_) => div()
-                                    .id(("tree-row", ix))
-                                    .h(px(22.))
-                                    .flex()
-                                    .items_center()
-                                    .pl(px(54.))
-                                    .text_size(px(11.))
-                                    .text_color(muted_color)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child("Indexes"),
-                                TreeRow::Index(_, name, cols, is_unique) => {
+                                TreeRow::IndexHeader(_) => {
+                                    build_row_container(depth, line_color).child(
+                                        div()
+                                            .id(("tree-row", ix))
+                                            .ml(px(indent))
+                                            .mr_2()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(4.))
+                                            .px(px(4.))
+                                            .py(px(3.))
+                                            .text_size(px(11.))
+                                            .text_color(muted_color)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(leaf_icon(dot_color))
+                                            .child("Indexes"),
+                                    )
+                                }
+                                TreeRow::Index(
+                                    _,
+                                    name,
+                                    cols,
+                                    is_unique,
+                                ) => {
                                     let u = if *is_unique {
                                         " UNIQUE"
                                     } else {
                                         ""
                                     };
-                                    div()
-                                        .id(("tree-row", ix))
-                                        .h(px(20.))
-                                        .flex()
-                                        .items_center()
-                                        .pl(px(66.))
-                                        .pr_2()
-                                        .text_size(px(11.))
-                                        .text_color(muted_color)
-                                        .overflow_x_hidden()
-                                        .child(format!(
-                                            "{}{} ({})",
-                                            name, u, cols
-                                        ))
+                                    build_row_container(depth, line_color).child(
+                                        div()
+                                            .id(("tree-row", ix))
+                                            .ml(px(indent))
+                                            .mr_2()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(4.))
+                                            .px(px(4.))
+                                            .py(px(3.))
+                                            .rounded(px(6.))
+                                            .text_size(px(11.))
+                                            .text_color(muted_color)
+                                            .overflow_x_hidden()
+                                            .hover(|s| s.bg(hover_bg))
+                                            .child(leaf_icon(dot_color))
+                                            .child(format!(
+                                                "{}{} ({})",
+                                                name, u, cols
+                                            )),
+                                    )
                                 }
                             }
                         })
@@ -446,47 +606,4 @@ impl Render for SchemaExplorer {
                     .into_any_element()
             })
     }
-}
-
-fn render_expandable_row(
-    ix: usize,
-    indent: Pixels,
-    expanded: bool,
-    label: &str,
-    text_color: Hsla,
-    muted_color: Hsla,
-    hover_bg: Hsla,
-    bold: bool,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> Stateful<Div> {
-    let arrow = if expanded { "▾" } else { "▸" };
-    div()
-        .id(("tree-row", ix))
-        .flex()
-        .flex_row()
-        .items_center()
-        .h(px(24.))
-        .pl(indent)
-        .pr_2()
-        .gap(px(4.))
-        .cursor_pointer()
-        .hover(|s| s.bg(hover_bg))
-        .on_click(on_click)
-        .child(
-            div()
-                .flex_shrink_0()
-                .w(px(12.))
-                .text_size(px(9.))
-                .text_color(muted_color)
-                .child(arrow),
-        )
-        .child(
-            div()
-                .flex_1()
-                .overflow_x_hidden()
-                .text_size(px(13.))
-                .text_color(text_color)
-                .when(bold, |el| el.font_weight(FontWeight::MEDIUM))
-                .child(label.to_string()),
-        )
 }
