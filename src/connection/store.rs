@@ -34,19 +34,40 @@ pub fn load_connections() -> Vec<ConnectionConfig> {
     }
 }
 
-pub fn save_password(connection_id: &str, password: &str) -> Result<()> {
-    let entry = keyring::Entry::new("slate", connection_id)?;
-    entry.set_password(password)?;
+fn passwords_file() -> PathBuf {
+    config_dir().join("passwords.json")
+}
+
+fn load_passwords_map() -> std::collections::HashMap<String, String> {
+    let path = passwords_file();
+    if !path.exists() {
+        return std::collections::HashMap::new();
+    }
+    match fs::read_to_string(&path) {
+        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+        Err(_) => std::collections::HashMap::new(),
+    }
+}
+
+fn save_passwords_map(map: &std::collections::HashMap<String, String>) -> Result<()> {
+    let json = serde_json::to_string_pretty(map)?;
+    fs::write(passwords_file(), json)?;
     Ok(())
+}
+
+pub fn save_password(connection_id: &str, password: &str) -> Result<()> {
+    let mut map = load_passwords_map();
+    map.insert(connection_id.to_string(), password.to_string());
+    save_passwords_map(&map)
 }
 
 pub fn load_password(connection_id: &str) -> Option<String> {
-    let entry = keyring::Entry::new("slate", connection_id).ok()?;
-    entry.get_password().ok()
+    let map = load_passwords_map();
+    map.get(connection_id).cloned()
 }
 
 pub fn delete_password(connection_id: &str) -> Result<()> {
-    let entry = keyring::Entry::new("slate", connection_id)?;
-    let _ = entry.delete_credential();
-    Ok(())
+    let mut map = load_passwords_map();
+    map.remove(connection_id);
+    save_passwords_map(&map)
 }

@@ -15,7 +15,7 @@ use crate::editor::query_editor::{QueryEditor, QueryEvent};
 use crate::grid::results_grid::ResultsGrid;
 use crate::schema::explorer::{SchemaEvent, SchemaExplorer};
 
-actions!(workspace, [ToggleAiSidebar, ShowConnectionDialog]);
+actions!(workspace, [ToggleAiSidebar, ShowConnectionDialog, ToggleSchemaSidebar]);
 
 struct PanelResize {
     panel: PanelSide,
@@ -40,6 +40,7 @@ pub struct Workspace {
     ai_sidebar: Entity<AiSidebar>,
     connection_dialog: Option<Entity<ConnectionDialog>>,
     ai_visible: bool,
+    left_panel_visible: bool,
     left_panel_width: Pixels,
     right_panel_width: Pixels,
     panel_resize: Option<PanelResize>,
@@ -170,6 +171,7 @@ impl Workspace {
             ai_sidebar,
             connection_dialog,
             ai_visible: false,
+            left_panel_visible: true,
             left_panel_width: px(260.),
             right_panel_width: px(300.),
             panel_resize: None,
@@ -183,6 +185,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.ai_visible = !self.ai_visible;
+        cx.notify();
+    }
+
+    fn toggle_schema_sidebar(
+        &mut self,
+        _: &ToggleSchemaSidebar,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.left_panel_visible = !self.left_panel_visible;
         cx.notify();
     }
 
@@ -261,6 +273,7 @@ impl Render for Workspace {
         let status = self.connection_status(cx);
         let is_connected = self.db.is_some();
         let ai_visible = self.ai_visible;
+        let left_panel_visible = self.left_panel_visible;
         let is_dark = theme.mode.is_dark();
         let left_w = self.left_panel_width;
         let right_w = self.right_panel_width;
@@ -279,6 +292,7 @@ impl Render for Workspace {
             .track_focus(&self.focus_handle(cx))
             .on_action(cx.listener(Self::toggle_ai_sidebar))
             .on_action(cx.listener(Self::show_connection_dialog))
+            .on_action(cx.listener(Self::toggle_schema_sidebar))
             // Global mouse tracking for panel resize
             .when(is_resizing, |el| el.cursor_col_resize())
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
@@ -393,39 +407,41 @@ impl Render for Workspace {
                     .flex_1()
                     .overflow_hidden()
                     // Left sidebar - Schema Explorer (resizable)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .flex_shrink_0()
-                            .w(left_w)
-                            .h_full()
-                            .border_r_1()
-                            .border_color(border_color)
-                            .child(self.schema_explorer.clone())
-                            // Left panel drag handle
-                            .child(
-                                div()
-                                    .id("left-resize-handle")
-                                    .w(px(4.))
-                                    .h_full()
-                                    .flex_shrink_0()
-                                    .cursor_col_resize()
-                                    .hover(|el| el.bg(resize_hover))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(
-                                            |this, event: &MouseDownEvent, _window, _cx| {
-                                                this.panel_resize = Some(PanelResize {
-                                                    panel: PanelSide::Left,
-                                                    start_x: event.position.x,
-                                                    original_width: this.left_panel_width,
-                                                });
-                                            },
+                    .when(left_panel_visible, |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_shrink_0()
+                                .w(left_w)
+                                .h_full()
+                                .border_r_1()
+                                .border_color(border_color)
+                                .child(self.schema_explorer.clone())
+                                // Left panel drag handle
+                                .child(
+                                    div()
+                                        .id("left-resize-handle")
+                                        .w(px(4.))
+                                        .h_full()
+                                        .flex_shrink_0()
+                                        .cursor_col_resize()
+                                        .hover(|el| el.bg(resize_hover))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(
+                                                |this, event: &MouseDownEvent, _window, _cx| {
+                                                    this.panel_resize = Some(PanelResize {
+                                                        panel: PanelSide::Left,
+                                                        start_x: event.position.x,
+                                                        original_width: this.left_panel_width,
+                                                    });
+                                                },
+                                            ),
                                         ),
-                                    ),
-                            ),
-                    )
+                                ),
+                        )
+                    })
                     // Center - Query Editor + Results Grid
                     .child(
                         div()

@@ -1,5 +1,6 @@
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::scroll::{Scrollbar, ScrollbarShow};
 use gpui_component::ActiveTheme;
 
 use crate::db::types::{CellValue, QueryResult};
@@ -71,13 +72,20 @@ impl ResultsGrid {
         let is_even = row_idx % 2 == 0;
         let row_bg = if is_even { bg } else { surface };
 
-        let mut row_div = div().flex().flex_row().h(px(24.)).bg(row_bg).w_full();
+        let mut row_div = div()
+            .flex()
+            .flex_row()
+            .h(px(24.))
+            .bg(row_bg)
+            .w_full()
+            .border_b_1()
+            .border_color(border_color);
 
         // Row number
         row_div = row_div.child(
             div()
                 .flex_shrink_0()
-                .w(px(50.))
+                .w(px(70.))
                 .h_full()
                 .flex()
                 .items_center()
@@ -125,7 +133,7 @@ impl ResultsGrid {
         }
 
         // Trailing spacer fills remaining width
-        row_div = row_div.child(div().flex_1().h_full().border_b_1().border_color(border_color));
+        row_div = row_div.child(div().flex_1().h_full());
 
         row_div
     }
@@ -181,7 +189,7 @@ impl Render for ResultsGrid {
         header = header.child(
             div()
                 .flex_shrink_0()
-                .w(px(50.))
+                .w(px(70.))
                 .h_full()
                 .flex()
                 .items_center()
@@ -286,43 +294,62 @@ impl Render for ResultsGrid {
             )
             // Header row
             .child(header)
-            // Data rows (virtual scrolled)
+            // Data rows (virtual scrolled) with scrollbar
             .child(
-                div().flex_1().child(
-                    uniform_list(
-                        "results-grid",
-                        row_count,
-                        cx.processor(
-                            move |this: &mut Self,
-                                  range: std::ops::Range<usize>,
-                                  _window: &mut Window,
-                                  cx: &mut Context<Self>| {
-                                let theme = cx.theme();
-                                let bg = theme.background;
-                                let surface = theme.secondary;
-                                let border_color = theme.border;
-                                let text_color = theme.foreground;
-                                let muted = theme.muted_foreground;
-                                let number_color: Hsla = gpui::rgb(0xf78c6c).into();
-                                range
-                                    .map(|ix| {
-                                        this.render_data_row(
-                                            ix,
-                                            bg,
-                                            surface,
-                                            border_color,
-                                            text_color,
-                                            muted,
-                                            number_color,
-                                        )
-                                    })
-                                    .collect()
-                            },
-                        ),
+                div()
+                    .id("results-scroll-area")
+                    .flex_1()
+                    .relative()
+                    .overflow_hidden()
+                    .child(
+                        uniform_list(
+                            "results-grid",
+                            row_count,
+                            cx.processor(
+                                move |this: &mut Self,
+                                      range: std::ops::Range<usize>,
+                                      _window: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    let theme = cx.theme();
+                                    let bg = theme.background;
+                                    let surface = theme.secondary;
+                                    let border_color = theme.border;
+                                    let text_color = theme.foreground;
+                                    let muted = theme.muted_foreground;
+                                    let number_color: Hsla = gpui::rgb(0xf78c6c).into();
+                                    range
+                                        .map(|ix| {
+                                            this.render_data_row(
+                                                ix,
+                                                bg,
+                                                surface,
+                                                border_color,
+                                                text_color,
+                                                muted,
+                                                number_color,
+                                            )
+                                        })
+                                        .collect()
+                                },
+                            ),
+                        )
+                        .h_full()
+                        .track_scroll(self.scroll_handle.clone()),
                     )
-                    .h_full()
-                    .track_scroll(self.scroll_handle.clone()),
-                ),
+                    // Vertical scrollbar overlay
+                    .child(
+                        div()
+                            .occlude()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .w(px(16.))
+                            .child(
+                                Scrollbar::vertical(&self.scroll_handle)
+                                    .scrollbar_show(ScrollbarShow::Always),
+                            ),
+                    ),
             )
             // Status bar
             .child(

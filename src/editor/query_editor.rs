@@ -3,14 +3,14 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName};
 
 use crate::db::connection::DatabaseService;
 use crate::db::types::QueryResult;
-use super::saved_queries::{self, SavedQuery};
+use super::saved_queries::{self, HistoryEntry, SavedQuery};
 
-actions!(query_editor, [ExecuteQuery]);
+actions!(query_editor, [ExecuteQuery, NewTab, CloseTab, SaveQuery, DismissPanel]);
 
 #[derive(Clone)]
 pub enum QueryEvent {
@@ -36,17 +36,28 @@ pub struct QueryEditor {
     next_tab_id: usize,
     saved_queries: Vec<SavedQuery>,
     show_saved: bool,
+    history: Vec<HistoryEntry>,
+    show_history: bool,
 }
 
 impl QueryEditor {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let sql_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .code_editor("sql")
+                .placeholder("Enter SQL query...")
+        });
+
+        cx.subscribe(&sql_input, |this: &mut Self, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::PressEnter { secondary: true }) {
+                this.execute(cx);
+            }
+        })
+        .detach();
+
         Self {
             focus_handle: cx.focus_handle(),
-            sql_input: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .code_editor("sql")
-                    .placeholder("Enter SQL query...")
-            }),
+            sql_input,
             db: None,
             error_message: None,
             is_executing: false,
@@ -60,6 +71,8 @@ impl QueryEditor {
             next_tab_id: 2,
             saved_queries: saved_queries::load_queries(),
             show_saved: false,
+            history: saved_queries::load_history(),
+            show_history: false,
         }
     }
 
@@ -91,6 +104,9 @@ impl QueryEditor {
         self.error_message = None;
         cx.notify();
 
+        let sql_for_history = sql.clone();
+        let timestamp = saved_queries::now_timestamp();
+
         cx.spawn(async move |this, cx| {
             let result: Result<crate::db::types::QueryResult, anyhow::Error> = cx
                 .background_executor()
@@ -99,6 +115,7 @@ impl QueryEditor {
 
             this.update(cx, |this, cx| {
                 this.is_executing = false;
+                let success = result.is_ok();
                 match result {
                     Ok(qr) => {
                         cx.emit(QueryEvent::QueryExecuted(qr));
@@ -108,6 +125,17 @@ impl QueryEditor {
                         cx.emit(QueryEvent::QueryError(e.to_string()));
                     }
                 }
+
+                // Record in history
+                let entry = HistoryEntry {
+                    sql: sql_for_history,
+                    timestamp,
+                    success,
+                };
+                this.history.insert(0, entry.clone());
+                this.history.truncate(200);
+                let _ = saved_queries::append_history(entry);
+
                 cx.notify();
             })
             .ok();
@@ -173,6 +201,101 @@ impl QueryEditor {
 
     fn on_execute(&mut self, _: &ExecuteQuery, _window: &mut Window, cx: &mut Context<Self>) {
         self.execute(cx);
+    }
+
+    fn on_new_tab(&mut self, _: &NewTab, _window: &mut Window, cx: &mut Context<Self>) {
+        self.add_tab(cx);
+    }
+
+    fn on_close_tab(&mut self, _: &CloseTab, _window: &mut Window, cx: &mut Context<Self>) {
+        self.close_tab(self.active_tab, cx);
+    }
+
+    fn on_save_query(&mut self, _: &SaveQuery, _window: &mut Window, cx: &mut Context<Self>) {
+        self.save_current_query(cx);
+    }
+
+    fn on_dismiss_panel(&mut self, _: &DismissPanel, _window: &mut Window, cx: &mut Context<Self>) {
+        self.show_saved = false;
+        self.show_history = false;
+        cx.notify();
+    }
+
+    fn save_current_query(&mut self, cx: &mut Context<Self>) {
+        let sql = self.sql_input.read(cx).value().to_string();
+        if sql.trim().is_empty() {
+            return;
+        }
+        let name = if let Some(tab) = self.tabs.get(self.active_tab) {
+            tab.title.clone()
+        } else {
+            "Untitled".to_string()
+        };
+        let query = SavedQuery {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+            sql,
+        };
+        self.saved_queries.push(query);
+        let _ = saved_queries::save_queries(&self.saved_queries);
+        cx.notify();
+    }
+
+    fn load_saved_query(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if let Some(query) = self.saved_queries.get(idx) {
+            self.pending_sql = Some(query.sql.clone());
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.sql = query.sql.clone();
+            }
+            self.show_saved = false;
+            cx.notify();
+        }
+    }
+
+    fn delete_saved_query(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if idx < self.saved_queries.len() {
+            self.saved_queries.remove(idx);
+            let _ = saved_queries::save_queries(&self.saved_queries);
+            cx.notify();
+        }
+    }
+
+    fn load_history_entry(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if let Some(entry) = self.history.get(idx) {
+            self.pending_sql = Some(entry.sql.clone());
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.sql = entry.sql.clone();
+            }
+            self.show_history = false;
+            cx.notify();
+        }
+    }
+
+    fn clear_history(&mut self, cx: &mut Context<Self>) {
+        self.history.clear();
+        let _ = saved_queries::clear_history();
+        cx.notify();
+    }
+
+    fn format_timestamp(ts: &str) -> String {
+        let secs: u64 = ts.parse().unwrap_or(0);
+        if secs == 0 {
+            return "unknown".to_string();
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let diff = now.saturating_sub(secs);
+        if diff < 60 {
+            "just now".to_string()
+        } else if diff < 3600 {
+            format!("{}m ago", diff / 60)
+        } else if diff < 86400 {
+            format!("{}h ago", diff / 3600)
+        } else {
+            format!("{}d ago", diff / 86400)
+        }
     }
 }
 
@@ -280,18 +403,66 @@ impl Render for QueryEditor {
                 .child("+"),
         );
 
+        // Right-aligned tab bar actions
+        tab_bar = tab_bar
+            .child(div().flex_1())
+            .child(
+                Button::new("history-btn")
+                    .ghost()
+                    .compact()
+                    .icon(Icon::new(IconName::GalleryVerticalEnd))
+                    .tooltip("Query History")
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.show_history = !this.show_history;
+                        this.show_saved = false;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("saved-queries-btn")
+                    .ghost()
+                    .compact()
+                    .icon(Icon::new(IconName::BookOpen))
+                    .tooltip("Saved Queries")
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.show_saved = !this.show_saved;
+                        this.show_history = false;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("save-query-btn")
+                    .ghost()
+                    .compact()
+                    .icon(Icon::new(IconName::Star))
+                    .tooltip("Save Query")
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.save_current_query(cx);
+                    })),
+            );
+
+        let show_saved = self.show_saved;
+        let show_history = self.show_history;
+        let saved_count = self.saved_queries.len();
+        let history_count = self.history.len();
+
         div()
             .flex()
             .flex_col()
             .w_full()
             .flex_1()
             .overflow_hidden()
+            .relative()
             .bg(surface)
             .border_b_1()
             .border_color(border_color)
             .key_context("QueryEditor")
             .track_focus(&self.focus_handle(cx))
             .on_action(cx.listener(Self::on_execute))
+            .on_action(cx.listener(Self::on_new_tab))
+            .on_action(cx.listener(Self::on_close_tab))
+            .on_action(cx.listener(Self::on_save_query))
+            .on_action(cx.listener(Self::on_dismiss_panel))
             // Tab bar
             .child(tab_bar)
             // Multi-line SQL editor
@@ -301,6 +472,277 @@ impl Render for QueryEditor {
                     .overflow_hidden()
                     .child(Input::new(&self.sql_input).h_full().rounded_none()),
             )
+            // Saved queries dropdown panel
+            .when(show_saved, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .right(px(8.))
+                        .top(px(34.))
+                        .w(px(300.))
+                        .max_h(px(300.))
+                        .overflow_hidden()
+                        .bg(bg)
+                        .border_1()
+                        .border_color(border_color)
+                        .rounded_md()
+                        .shadow_md()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .px_3()
+                                .py_2()
+                                .border_b_1()
+                                .border_color(border_color)
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(text_color)
+                                        .child("Saved Queries"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(muted)
+                                        .child(format!("{} saved", saved_count)),
+                                ),
+                        )
+                        .children(
+                            self.saved_queries
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, query)| {
+                                    let sql_preview = if query.sql.len() > 60 {
+                                        format!("{}...", &query.sql[..60])
+                                    } else {
+                                        query.sql.clone()
+                                    };
+                                    div()
+                                        .id(ElementId::Name(
+                                            format!("saved-q-{}", idx).into(),
+                                        ))
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(8.))
+                                        .px_3()
+                                        .py_2()
+                                        .cursor_pointer()
+                                        .border_b_1()
+                                        .border_color(border_color)
+                                        .hover(|el| el.bg(surface))
+                                        .on_click(cx.listener(
+                                            move |this, _, _window, cx| {
+                                                this.load_saved_query(idx, cx);
+                                            },
+                                        ))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .overflow_hidden()
+                                                .child(
+                                                    div()
+                                                        .text_size(px(12.))
+                                                        .font_weight(
+                                                            FontWeight::MEDIUM,
+                                                        )
+                                                        .text_color(text_color)
+                                                        .child(query.name.clone()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(11.))
+                                                        .text_color(muted)
+                                                        .text_ellipsis()
+                                                        .overflow_x_hidden()
+                                                        .child(sql_preview),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(ElementId::Name(
+                                                    format!("del-saved-{}", idx)
+                                                        .into(),
+                                                ))
+                                                .cursor_pointer()
+                                                .text_size(px(10.))
+                                                .text_color(muted)
+                                                .hover(|el| {
+                                                    el.text_color(error_color)
+                                                })
+                                                .rounded_sm()
+                                                .px(px(4.))
+                                                .py(px(2.))
+                                                .on_click(cx.listener(
+                                                    move |this, _, _window, cx| {
+                                                        this.delete_saved_query(
+                                                            idx, cx,
+                                                        );
+                                                    },
+                                                ))
+                                                .child("×"),
+                                        )
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .when(saved_count == 0, |el: Div| {
+                            el.child(
+                                div()
+                                    .p_3()
+                                    .text_size(px(12.))
+                                    .text_color(muted)
+                                    .child("No saved queries yet. Click the star to save the current query."),
+                            )
+                        }),
+                )
+            })
+            // History dropdown panel
+            .when(show_history, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .right(px(8.))
+                        .top(px(34.))
+                        .w(px(360.))
+                        .max_h(px(350.))
+                        .overflow_hidden()
+                        .bg(bg)
+                        .border_1()
+                        .border_color(border_color)
+                        .rounded_md()
+                        .shadow_md()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .px_3()
+                                .py_2()
+                                .border_b_1()
+                                .border_color(border_color)
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(text_color)
+                                        .child("Query History"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(8.))
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(muted)
+                                                .child(format!("{} queries", history_count)),
+                                        )
+                                        .when(history_count > 0, |el| {
+                                            el.child(
+                                                div()
+                                                    .id("clear-history")
+                                                    .cursor_pointer()
+                                                    .text_size(px(11.))
+                                                    .text_color(muted)
+                                                    .hover(|el| el.text_color(error_color))
+                                                    .child("Clear")
+                                                    .on_click(cx.listener(
+                                                        |this, _, _window, cx| {
+                                                            this.clear_history(cx);
+                                                        },
+                                                    )),
+                                            )
+                                        }),
+                                ),
+                        )
+                        .children(
+                            self.history
+                                .iter()
+                                .take(50)
+                                .enumerate()
+                                .map(|(idx, entry)| {
+                                    let sql_preview = if entry.sql.len() > 80 {
+                                        format!("{}...", &entry.sql[..80])
+                                    } else {
+                                        entry.sql.clone()
+                                    };
+                                    let time_str =
+                                        Self::format_timestamp(&entry.timestamp);
+                                    let success = entry.success;
+                                    div()
+                                        .id(ElementId::Name(
+                                            format!("hist-{}", idx).into(),
+                                        ))
+                                        .flex()
+                                        .flex_row()
+                                        .items_start()
+                                        .gap(px(8.))
+                                        .px_3()
+                                        .py_2()
+                                        .cursor_pointer()
+                                        .border_b_1()
+                                        .border_color(border_color)
+                                        .hover(|el| el.bg(surface))
+                                        .on_click(cx.listener(
+                                            move |this, _, _window, cx| {
+                                                this.load_history_entry(idx, cx);
+                                            },
+                                        ))
+                                        .child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .w(px(6.))
+                                                .h(px(6.))
+                                                .mt(px(5.))
+                                                .rounded_full()
+                                                .bg(if success {
+                                                    gpui::rgb(0x4ade80).into()
+                                                } else {
+                                                    error_color
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .overflow_hidden()
+                                                .child(
+                                                    div()
+                                                        .text_size(px(12.))
+                                                        .text_color(text_color)
+                                                        .text_ellipsis()
+                                                        .overflow_x_hidden()
+                                                        .child(sql_preview),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(10.))
+                                                        .text_color(muted)
+                                                        .child(time_str),
+                                                ),
+                                        )
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .when(history_count == 0, |el: Div| {
+                            el.child(
+                                div()
+                                    .p_3()
+                                    .text_size(px(12.))
+                                    .text_color(muted)
+                                    .child(
+                                        "No query history yet. Execute a query to start building history.",
+                                    ),
+                            )
+                        }),
+                )
+            })
             // Toolbar
             .child(
                 div()
