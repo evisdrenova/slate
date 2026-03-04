@@ -215,7 +215,7 @@ impl CompletionProvider for SqlCompletionProvider {
         _cx: &mut Context<InputState>,
     ) -> bool {
         if let Some(ch) = new_text.chars().last() {
-            ch.is_alphanumeric() || ch == '_'
+            ch.is_alphanumeric() || ch == '_' || ch == '.'
         } else {
             false
         }
