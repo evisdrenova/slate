@@ -10,7 +10,7 @@ use crate::db::connection::DatabaseService;
 use crate::db::types::QueryResult;
 use super::saved_queries::{self, HistoryEntry, SavedQuery};
 
-actions!(query_editor, [ExecuteQuery, NewTab, CloseTab, SaveQuery, DismissPanel]);
+actions!(query_editor, [ExecuteQuery, NewTab, CloseTab, SaveQuery, DismissPanel, HistoryPrev, HistoryNext]);
 
 #[derive(Clone)]
 pub enum QueryEvent {
@@ -38,6 +38,8 @@ pub struct QueryEditor {
     show_saved: bool,
     history: Vec<HistoryEntry>,
     show_history: bool,
+    history_cursor: Option<usize>,
+    pre_history_sql: Option<String>,
 }
 
 impl QueryEditor {
@@ -50,6 +52,13 @@ impl QueryEditor {
 
         cx.subscribe(&sql_input, |this: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::PressEnter { secondary: true }) {
+                // Undo the newline the Input just inserted
+                let current = this.sql_input.read(cx).value().to_string();
+                let cleaned = current.trim_end_matches(|c: char| c == '\n' || c == ' ').to_string();
+                this.pending_sql = Some(cleaned.clone());
+                if let Some(tab) = this.tabs.get_mut(this.active_tab) {
+                    tab.sql = cleaned;
+                }
                 this.execute(cx);
             }
         })
@@ -73,6 +82,8 @@ impl QueryEditor {
             show_saved: false,
             history: saved_queries::load_history(),
             show_history: false,
+            history_cursor: None,
+            pre_history_sql: None,
         }
     }
 
@@ -102,6 +113,8 @@ impl QueryEditor {
 
         self.is_executing = true;
         self.error_message = None;
+        self.history_cursor = None;
+        self.pre_history_sql = None;
         cx.notify();
 
         let sql_for_history = sql.clone();
@@ -158,6 +171,8 @@ impl QueryEditor {
         self.active_tab = idx;
         self.pending_sql = Some(self.tabs[idx].sql.clone());
         self.error_message = None;
+        self.history_cursor = None;
+        self.pre_history_sql = None;
         cx.notify();
     }
 
@@ -218,6 +233,54 @@ impl QueryEditor {
     fn on_dismiss_panel(&mut self, _: &DismissPanel, _window: &mut Window, cx: &mut Context<Self>) {
         self.show_saved = false;
         self.show_history = false;
+        cx.notify();
+    }
+
+    fn on_history_prev(&mut self, _: &HistoryPrev, _window: &mut Window, cx: &mut Context<Self>) {
+        eprintln!("[DEBUG] on_history_prev called, history.len()={}", self.history.len());
+        if self.history.is_empty() {
+            return;
+        }
+        let new_cursor = match self.history_cursor {
+            None => {
+                // Save current editor text before entering history
+                let current = self.sql_input.read(cx).value().to_string();
+                self.pre_history_sql = Some(current);
+                0
+            }
+            Some(c) => (c + 1).min(self.history.len() - 1),
+        };
+        self.history_cursor = Some(new_cursor);
+        let sql = self.history[new_cursor].sql.clone();
+        self.pending_sql = Some(sql.clone());
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.sql = sql;
+        }
+        cx.notify();
+    }
+
+    fn on_history_next(&mut self, _: &HistoryNext, _window: &mut Window, cx: &mut Context<Self>) {
+        eprintln!("[DEBUG] on_history_next called, cursor={:?}", self.history_cursor);
+        let Some(cursor) = self.history_cursor else {
+            return;
+        };
+        if cursor == 0 {
+            // Restore the pre-history text
+            let restored = self.pre_history_sql.take().unwrap_or_default();
+            self.history_cursor = None;
+            self.pending_sql = Some(restored.clone());
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.sql = restored;
+            }
+        } else {
+            let new_cursor = cursor - 1;
+            self.history_cursor = Some(new_cursor);
+            let sql = self.history[new_cursor].sql.clone();
+            self.pending_sql = Some(sql.clone());
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.sql = sql;
+            }
+        }
         cx.notify();
     }
 
@@ -463,6 +526,8 @@ impl Render for QueryEditor {
             .on_action(cx.listener(Self::on_close_tab))
             .on_action(cx.listener(Self::on_save_query))
             .on_action(cx.listener(Self::on_dismiss_panel))
+            .on_action(cx.listener(Self::on_history_prev))
+            .on_action(cx.listener(Self::on_history_next))
             // Tab bar
             .child(tab_bar)
             // Multi-line SQL editor

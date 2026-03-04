@@ -10,7 +10,7 @@ use gpui::*;
 use gpui_component::Root;
 use workspace::Workspace;
 
-use crate::editor::query_editor::{NewTab, CloseTab, SaveQuery, DismissPanel};
+use crate::editor::query_editor::{NewTab, CloseTab, SaveQuery, DismissPanel, HistoryPrev, HistoryNext};
 use crate::workspace::{ToggleSchemaSidebar, ToggleAiSidebar};
 
 fn main() {
@@ -25,6 +25,9 @@ fn main() {
                 KeyBinding::new("cmd-w", CloseTab, Some("QueryEditor")),
                 KeyBinding::new("cmd-s", SaveQuery, Some("QueryEditor")),
                 KeyBinding::new("escape", DismissPanel, Some("QueryEditor")),
+                // History cycling (None context = highest priority, overrides Input's SelectToStart/SelectToEnd)
+                KeyBinding::new("cmd-shift-up", HistoryPrev, None),
+                KeyBinding::new("cmd-shift-down", HistoryNext, None),
                 // Workspace shortcuts
                 KeyBinding::new("cmd-b", ToggleSchemaSidebar, Some("Workspace")),
                 KeyBinding::new("cmd-j", ToggleAiSidebar, Some("Workspace")),
