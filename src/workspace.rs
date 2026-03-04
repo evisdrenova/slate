@@ -105,54 +105,7 @@ impl Workspace {
             cx.subscribe(dialog, |this: &mut Self, _, event: &ConnectionEvent, cx| {
                 match event {
                     ConnectionEvent::Connected(db, config) => {
-                        this.db = Some(db.clone());
-                        this.db_type = config.db_type;
-                        this.connection_config = Some(config.clone());
-                        this.connection_dialog = None;
-
-                        // Pass DB to query editor
-                        this.query_editor.update(cx, |editor, _cx| {
-                            editor.set_connection(db.clone());
-                        });
-
-                        // Load schema
-                        let db_clone = db.clone();
-                        let config_clone = config.clone();
-                        this.schema_explorer.update(cx, |explorer, cx| {
-                            explorer.load_schema(db_clone.clone(), &config_clone, cx);
-                        });
-
-                        // Pass db_type to AI sidebar
-                        let db_type = config.db_type;
-                        this.ai_sidebar.update(cx, |sidebar, _cx| {
-                            sidebar.set_db_type(db_type);
-                        });
-
-                        // Load schema for AI sidebar and query editor autocomplete
-                        let db_for_schema = db.clone();
-                        let db_name = config.database.clone();
-                        cx.spawn(async move |this, cx| {
-                            let result: Result<crate::db::schema::DatabaseSchema, anyhow::Error> = cx
-                                .background_executor()
-                                .spawn(async move {
-                                    schema::fetch_schema(&db_for_schema, &db_name)
-                                })
-                                .await;
-
-                            if let Ok(db_schema) = result {
-                                this.update(cx, |this, cx| {
-                                    this.ai_sidebar.update(cx, |sidebar, _cx| {
-                                        sidebar.set_schema(db_schema.clone());
-                                    });
-                                    this.query_editor.update(cx, |editor, _cx| {
-                                        editor.set_schema(db_schema);
-                                    });
-                                }).ok();
-                            }
-                        })
-                        .detach();
-
-                        cx.notify();
+                        this.setup_connection(db.clone(), config.clone(), cx);
                     }
                     ConnectionEvent::Cancelled => {
                         this.connection_dialog = None;
@@ -163,7 +116,29 @@ impl Workspace {
             .detach();
         }
 
-        Self {
+        // Try auto-connect to last used database
+        let try_auto_connect = if let Some(last_id) = crate::connection::store::load_last_connection_id() {
+            let connections = crate::connection::store::load_connections();
+            if let Some(config) = connections.into_iter().find(|c| c.id == last_id) {
+                if let Some(password) = crate::connection::store::load_password(&config.id) {
+                    Some((config, password))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let connection_dialog = if try_auto_connect.is_some() {
+            None // Skip dialog, we'll auto-connect
+        } else {
+            connection_dialog
+        };
+
+        let ws = Self {
             focus_handle: cx.focus_handle(),
             db: None,
             db_type: DbType::MySQL,
@@ -178,7 +153,80 @@ impl Workspace {
             left_panel_width: px(260.),
             right_panel_width: px(300.),
             panel_resize: None,
+        };
+
+        if let Some((config, password)) = try_auto_connect {
+            cx.spawn(async move |this, cx| {
+                let config_clone = config.clone();
+                let pw = password.clone();
+                let result: Result<DatabaseService, anyhow::Error> = cx
+                    .background_executor()
+                    .spawn(async move { DatabaseService::connect(&config_clone, &pw) })
+                    .await;
+
+                this.update(cx, |this, cx| {
+                    match result {
+                        Ok(db) => {
+                            this.setup_connection(Arc::new(db), config, cx);
+                        }
+                        Err(_) => {
+                            // Auto-connect failed, show connection dialog
+                            // We need window access to create the dialog, so dispatch the action
+                            cx.dispatch_action(&ShowConnectionDialog);
+                        }
+                    }
+                }).ok();
+            })
+            .detach();
         }
+
+        ws
+    }
+
+    fn setup_connection(&mut self, db: Arc<DatabaseService>, config: ConnectionConfig, cx: &mut Context<Self>) {
+        self.db = Some(db.clone());
+        self.db_type = config.db_type;
+        self.connection_config = Some(config.clone());
+        self.connection_dialog = None;
+
+        self.query_editor.update(cx, |editor, _cx| {
+            editor.set_connection(db.clone());
+        });
+
+        let db_clone = db.clone();
+        let config_clone = config.clone();
+        self.schema_explorer.update(cx, |explorer, cx| {
+            explorer.load_schema(db_clone, &config_clone, cx);
+        });
+
+        self.ai_sidebar.update(cx, |sidebar, _cx| {
+            sidebar.set_db_type(config.db_type);
+        });
+
+        let db_for_schema = db.clone();
+        let db_name = config.database.clone();
+        cx.spawn(async move |this, cx| {
+            let result: Result<crate::db::schema::DatabaseSchema, anyhow::Error> = cx
+                .background_executor()
+                .spawn(async move {
+                    schema::fetch_schema(&db_for_schema, &db_name)
+                })
+                .await;
+
+            if let Ok(db_schema) = result {
+                this.update(cx, |this, cx| {
+                    this.ai_sidebar.update(cx, |sidebar, _cx| {
+                        sidebar.set_schema(db_schema.clone());
+                    });
+                    this.query_editor.update(cx, |editor, _cx| {
+                        editor.set_schema(db_schema);
+                    });
+                }).ok();
+            }
+        })
+        .detach();
+
+        cx.notify();
     }
 
     fn toggle_ai_sidebar(
@@ -211,52 +259,7 @@ impl Workspace {
         cx.subscribe(&dialog, |this: &mut Self, _, event: &ConnectionEvent, cx| {
             match event {
                 ConnectionEvent::Connected(db, config) => {
-                    this.db = Some(db.clone());
-                    this.db_type = config.db_type;
-                    this.connection_config = Some(config.clone());
-                    this.connection_dialog = None;
-
-                    this.query_editor.update(cx, |editor, _cx| {
-                        editor.set_connection(db.clone());
-                    });
-
-                    let db_clone = db.clone();
-                    let config_clone = config.clone();
-                    this.schema_explorer.update(cx, |explorer, cx| {
-                        explorer.load_schema(db_clone, &config_clone, cx);
-                    });
-
-                    // Pass db_type to AI sidebar
-                    let db_type = config.db_type;
-                    this.ai_sidebar.update(cx, |sidebar, _cx| {
-                        sidebar.set_db_type(db_type);
-                    });
-
-                    // Load schema for AI sidebar and query editor autocomplete
-                    let db_for_schema = db.clone();
-                    let db_name = config.database.clone();
-                    cx.spawn(async move |this, cx| {
-                        let result: Result<crate::db::schema::DatabaseSchema, anyhow::Error> = cx
-                            .background_executor()
-                            .spawn(async move {
-                                schema::fetch_schema(&db_for_schema, &db_name)
-                            })
-                            .await;
-
-                        if let Ok(db_schema) = result {
-                            this.update(cx, |this, cx| {
-                                this.ai_sidebar.update(cx, |sidebar, _cx| {
-                                    sidebar.set_schema(db_schema.clone());
-                                });
-                                this.query_editor.update(cx, |editor, _cx| {
-                                    editor.set_schema(db_schema);
-                                });
-                            }).ok();
-                        }
-                    })
-                    .detach();
-
-                    cx.notify();
+                    this.setup_connection(db.clone(), config.clone(), cx);
                 }
                 ConnectionEvent::Cancelled => {
                     this.connection_dialog = None;

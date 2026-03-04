@@ -71,3 +71,24 @@ pub fn delete_password(connection_id: &str) -> Result<()> {
     map.remove(connection_id);
     save_passwords_map(&map)
 }
+
+fn last_connection_file() -> PathBuf {
+    config_dir().join("last_connection.json")
+}
+
+pub fn save_last_connection_id(connection_id: &str) -> Result<()> {
+    let json = serde_json::to_string(connection_id)?;
+    fs::write(last_connection_file(), json)?;
+    Ok(())
+}
+
+pub fn load_last_connection_id() -> Option<String> {
+    let path = last_connection_file();
+    if !path.exists() {
+        return None;
+    }
+    match fs::read_to_string(&path) {
+        Ok(json) => serde_json::from_str(&json).ok(),
+        Err(_) => None,
+    }
+}

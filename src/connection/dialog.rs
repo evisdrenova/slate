@@ -217,6 +217,7 @@ impl ConnectionDialog {
                     conns.push(config.clone());
                     let _ = crate::connection::store::save_connections(&conns);
                     let _ = crate::connection::store::save_password(&config.id, &password);
+                    let _ = crate::connection::store::save_last_connection_id(&config.id);
                     cx.emit(ConnectionEvent::Connected(Arc::new(db), config));
                     cx.notify();
                 }
