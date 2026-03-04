@@ -6,6 +6,7 @@ use gpui::{Context, Task, Window};
 use gpui_component::input::{CompletionProvider, InputState, RopeExt};
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse,
+    CompletionTextEdit, TextEdit,
 };
 use ropey::Rope;
 
@@ -40,35 +41,58 @@ impl SqlCompletionProvider {
         *self.schema.borrow_mut() = Some(schema);
     }
 
+    /// Extract the word (including dots) before the cursor.
+    /// Returns (word, has_dot).
     fn extract_word_before_cursor(text: &Rope, offset: usize) -> (String, bool) {
-        // Walk backwards from offset to find the current word
-        // Returns (word, has_dot_prefix) where has_dot_prefix means "tablename." pattern
-        if offset == 0 {
-            return (String::new(), false);
-        }
-
-        let mut start = offset;
-
-        // Walk backwards collecting word chars
-        while start > 0 {
-            let prev = start - 1;
-            if let Some(ch) = text.char_at(prev) {
-                if ch.is_alphanumeric() || ch == '_' || ch == '.' {
-                    start = prev;
-                } else {
-                    break;
-                }
-            } else {
-                break;
+        let text_str = text.to_string();
+        let clamped = offset.min(text_str.len());
+        let safe_offset = if text_str.is_char_boundary(clamped) {
+            clamped
+        } else {
+            let mut o = clamped;
+            while o > 0 && !text_str.is_char_boundary(o) {
+                o -= 1;
             }
-        }
+            o
+        };
+        let before_cursor = &text_str[..safe_offset];
 
-        let word: String = (start..offset)
-            .filter_map(|i| text.char_at(i))
+        let word: String = before_cursor
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
             .collect();
 
         let has_dot = word.contains('.');
         (word, has_dot)
+    }
+
+    /// Build a CompletionItem with an explicit text_edit so the replacement
+    /// range is always correct, regardless of the menu's stale trigger_start_offset.
+    fn make_item(
+        label: String,
+        kind: CompletionItemKind,
+        detail: Option<String>,
+        edit_range: lsp_types::Range,
+    ) -> CompletionItem {
+        CompletionItem {
+            label: label.clone(),
+            kind: Some(kind),
+            detail,
+            // filter_text = label prevents the highlight range (0..filter_text.len())
+            // from exceeding the label length when the menu query grows.
+            filter_text: Some(label.clone()),
+            // Explicit text_edit overrides the menu's trigger_start_offset..cursor
+            // default, which can be stale and eat too much text.
+            text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                range: edit_range,
+                new_text: label,
+            })),
+            ..Default::default()
+        }
     }
 }
 
@@ -87,28 +111,38 @@ impl CompletionProvider for SqlCompletionProvider {
             return Task::ready(Ok(CompletionResponse::Array(vec![])));
         }
 
+        let end_pos = text.offset_to_position(offset);
+
         let mut items: Vec<CompletionItem> = Vec::new();
         let schema = self.schema.borrow();
 
         if has_dot {
-            // Dot-completion: "tablename." -> suggest that table's columns
+            // Dot-completion: "tablename.col" -> suggest that table's columns
             let parts: Vec<&str> = word.splitn(2, '.').collect();
             let table_name = parts[0].to_lowercase();
-            let col_prefix = parts.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
+            let col_prefix = parts.get(1).map(|s| s.to_string()).unwrap_or_default();
+
+            // Replace only the part after the dot
+            let replace_start = offset - col_prefix.len();
+            let start_pos = text.offset_to_position(replace_start);
+            let edit_range = lsp_types::Range {
+                start: start_pos,
+                end: end_pos,
+            };
 
             if let Some(ref schema) = *schema {
                 for table in &schema.tables {
                     if table.name.to_lowercase() == table_name {
                         for col in &table.columns {
                             if col_prefix.is_empty()
-                                || col.name.to_lowercase().starts_with(&col_prefix)
+                                || col.name.to_lowercase().starts_with(&col_prefix.to_lowercase())
                             {
-                                items.push(CompletionItem {
-                                    label: col.name.clone(),
-                                    kind: Some(CompletionItemKind::FIELD),
-                                    detail: Some(col.data_type.clone()),
-                                    ..Default::default()
-                                });
+                                items.push(Self::make_item(
+                                    col.name.clone(),
+                                    CompletionItemKind::FIELD,
+                                    Some(col.data_type.clone()),
+                                    edit_range,
+                                ));
                             }
                         }
                         break;
@@ -118,14 +152,23 @@ impl CompletionProvider for SqlCompletionProvider {
         } else {
             let prefix = word.to_lowercase();
 
+            // Replace the current word
+            let replace_start = offset - word.len();
+            let start_pos = text.offset_to_position(replace_start);
+            let edit_range = lsp_types::Range {
+                start: start_pos,
+                end: end_pos,
+            };
+
             // SQL keywords
             for &kw in SQL_KEYWORDS {
                 if kw.to_lowercase().starts_with(&prefix) {
-                    items.push(CompletionItem {
-                        label: kw.to_string(),
-                        kind: Some(CompletionItemKind::KEYWORD),
-                        ..Default::default()
-                    });
+                    items.push(Self::make_item(
+                        kw.to_string(),
+                        CompletionItemKind::KEYWORD,
+                        None,
+                        edit_range,
+                    ));
                 }
             }
 
@@ -133,12 +176,12 @@ impl CompletionProvider for SqlCompletionProvider {
             if let Some(ref schema) = *schema {
                 for table in &schema.tables {
                     if table.name.to_lowercase().starts_with(&prefix) {
-                        items.push(CompletionItem {
-                            label: table.name.clone(),
-                            kind: Some(CompletionItemKind::CLASS),
-                            detail: Some(format!("{} columns", table.columns.len())),
-                            ..Default::default()
-                        });
+                        items.push(Self::make_item(
+                            table.name.clone(),
+                            CompletionItemKind::CLASS,
+                            Some(format!("{} columns", table.columns.len())),
+                            edit_range,
+                        ));
                     }
                 }
 
@@ -146,12 +189,12 @@ impl CompletionProvider for SqlCompletionProvider {
                 for table in &schema.tables {
                     for col in &table.columns {
                         if col.name.to_lowercase().starts_with(&prefix) {
-                            items.push(CompletionItem {
-                                label: col.name.clone(),
-                                kind: Some(CompletionItemKind::FIELD),
-                                detail: Some(format!("{}.{}", table.name, col.data_type)),
-                                ..Default::default()
-                            });
+                            items.push(Self::make_item(
+                                col.name.clone(),
+                                CompletionItemKind::FIELD,
+                                Some(format!("{}.{}", table.name, col.data_type)),
+                                edit_range,
+                            ));
                         }
                     }
                 }
@@ -172,7 +215,7 @@ impl CompletionProvider for SqlCompletionProvider {
         _cx: &mut Context<InputState>,
     ) -> bool {
         if let Some(ch) = new_text.chars().last() {
-            ch.is_alphanumeric() || ch == '_' || ch == '.'
+            ch.is_alphanumeric() || ch == '_'
         } else {
             false
         }
