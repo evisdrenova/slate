@@ -22,3 +22,5 @@ uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 url = "2"
 unicode-segmentation = "1"
+lsp-types = { version = "0.97.0", features = ["proposed"] }
+ropey = { version = "=2.0.0-beta.1", features = ["metric_lines_lf", "metric_utf16"] }

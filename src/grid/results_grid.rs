@@ -6,6 +6,7 @@ use gpui_component::ActiveTheme;
 use crate::db::types::{CellValue, QueryResult};
 
 const MIN_COL_WIDTH: f32 = 40.0;
+const MAX_TABS: usize = 20;
 
 struct ColumnResize {
     col_idx: usize,
@@ -13,11 +14,19 @@ struct ColumnResize {
     original_width: Pixels,
 }
 
-pub struct ResultsGrid {
-    focus_handle: FocusHandle,
-    result: Option<QueryResult>,
+struct ResultTab {
+    id: usize,
+    title: String,
+    result: QueryResult,
     column_widths: Vec<Pixels>,
     scroll_handle: UniformListScrollHandle,
+}
+
+pub struct ResultsGrid {
+    focus_handle: FocusHandle,
+    tabs: Vec<ResultTab>,
+    active_tab: usize,
+    next_tab_id: usize,
     resize_state: Option<ColumnResize>,
 }
 
@@ -25,15 +34,15 @@ impl ResultsGrid {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
-            result: None,
-            column_widths: Vec::new(),
-            scroll_handle: UniformListScrollHandle::new(),
+            tabs: Vec::new(),
+            active_tab: 0,
+            next_tab_id: 1,
             resize_state: None,
         }
     }
 
-    pub fn set_result(&mut self, result: QueryResult, cx: &mut Context<Self>) {
-        self.column_widths = result
+    pub fn add_result(&mut self, result: QueryResult, sql: &str, cx: &mut Context<Self>) {
+        let column_widths: Vec<Pixels> = result
             .columns
             .iter()
             .map(|col| -> Pixels {
@@ -44,19 +53,70 @@ impl ResultsGrid {
             })
             .collect();
 
-        self.result = Some(result);
-        self.scroll_handle = UniformListScrollHandle::new();
+        let title = if sql.len() > 20 {
+            format!("{}...", &sql[..20])
+        } else if sql.is_empty() {
+            format!("Result {}", self.next_tab_id)
+        } else {
+            sql.to_string()
+        };
+
+        let tab = ResultTab {
+            id: self.next_tab_id,
+            title,
+            result,
+            column_widths,
+            scroll_handle: UniformListScrollHandle::new(),
+        };
+        self.next_tab_id += 1;
+
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+
+        // Cap at MAX_TABS by removing oldest
+        while self.tabs.len() > MAX_TABS {
+            self.tabs.remove(0);
+            if self.active_tab > 0 {
+                self.active_tab -= 1;
+            }
+        }
+
         cx.notify();
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
-        self.result = None;
-        self.column_widths.clear();
+        self.tabs.clear();
+        self.active_tab = 0;
         cx.notify();
+    }
+
+    fn close_tab(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if idx >= self.tabs.len() {
+            return;
+        }
+        self.tabs.remove(idx);
+        if self.tabs.is_empty() {
+            self.active_tab = 0;
+        } else if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        } else if idx < self.active_tab {
+            self.active_tab -= 1;
+        } else if idx == self.active_tab && self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        }
+        cx.notify();
+    }
+
+    fn switch_tab(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if idx < self.tabs.len() {
+            self.active_tab = idx;
+            cx.notify();
+        }
     }
 
     fn render_data_row(
         &self,
+        tab: &ResultTab,
         row_idx: usize,
         bg: Hsla,
         surface: Hsla,
@@ -65,10 +125,7 @@ impl ResultsGrid {
         muted: Hsla,
         number_color: Hsla,
     ) -> Div {
-        let Some(result) = &self.result else {
-            return div();
-        };
-        let row = &result.rows[row_idx];
+        let row = &tab.result.rows[row_idx];
         let is_even = row_idx % 2 == 0;
         let row_bg = if is_even { bg } else { surface };
 
@@ -99,7 +156,7 @@ impl ResultsGrid {
         );
 
         for (i, cell) in row.cells.iter().enumerate() {
-            let width = self
+            let width = tab
                 .column_widths
                 .get(i)
                 .copied()
@@ -154,10 +211,12 @@ impl Render for ResultsGrid {
         let text_color = theme.foreground;
         let muted = theme.muted_foreground;
         let accent = theme.primary;
+        let error_color = theme.danger;
 
-        if self.result.is_none() {
+        if self.tabs.is_empty() {
             return div()
                 .flex()
+                .flex_col()
                 .flex_1()
                 .items_center()
                 .justify_center()
@@ -167,11 +226,77 @@ impl Render for ResultsGrid {
                 .child("Execute a query to see results");
         }
 
-        let result = self.result.as_ref().unwrap();
-        let row_count = result.rows.len();
-        let exec_time = result.execution_time_ms;
-        let affected = result.affected_rows;
-        let col_count = result.columns.len();
+        let active_tab = self.active_tab;
+
+        // Tab bar
+        let mut tab_bar = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .h(px(28.))
+            .bg(bg)
+            .border_b_1()
+            .border_color(border_color)
+            .px_1()
+            .gap(px(1.))
+            .overflow_x_hidden();
+
+        for (idx, tab) in self.tabs.iter().enumerate() {
+            let is_active = idx == active_tab;
+            let tab_id = tab.id;
+            let title = tab.title.clone();
+
+            let mut tab_el = div()
+                .id(ElementId::Name(format!("rtab-{}", tab_id).into()))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.))
+                .px_2()
+                .py(px(3.))
+                .rounded_t_md()
+                .cursor_pointer()
+                .text_size(px(11.))
+                .flex_shrink_0()
+                .max_w(px(160.))
+                .when(is_active, |el| el.bg(surface).text_color(text_color))
+                .when(!is_active, |el| {
+                    el.text_color(muted)
+                        .hover(|el| el.bg(surface.opacity(0.5)))
+                })
+                .on_click(cx.listener(move |this, _, _window, cx| {
+                    this.switch_tab(idx, cx);
+                }))
+                .child(
+                    div()
+                        .overflow_x_hidden()
+                        .text_ellipsis()
+                        .child(title),
+                );
+
+            tab_el = tab_el.child(
+                div()
+                    .id(ElementId::Name(format!("close-rtab-{}", tab_id).into()))
+                    .cursor_pointer()
+                    .text_size(px(10.))
+                    .text_color(muted)
+                    .hover(|el| el.text_color(error_color))
+                    .rounded_sm()
+                    .px(px(2.))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.close_tab(idx, cx);
+                    }))
+                    .child("×"),
+            );
+
+            tab_bar = tab_bar.child(tab_el);
+        }
+
+        let tab = &self.tabs[self.active_tab];
+        let row_count = tab.result.rows.len();
+        let exec_time = tab.result.execution_time_ms;
+        let affected = tab.result.affected_rows;
+        let col_count = tab.result.columns.len();
         let is_resizing = self.resize_state.is_some();
 
         // Build header row with resize handles
@@ -203,8 +328,8 @@ impl Render for ResultsGrid {
 
         // Data column headers with resize handles
         let resize_hover = Hsla { a: 0.5, ..accent };
-        for (i, col) in result.columns.iter().enumerate() {
-            let width = self.column_widths.get(i).copied().unwrap_or(px(100.));
+        for (i, col) in tab.result.columns.iter().enumerate() {
+            let width = tab.column_widths.get(i).copied().unwrap_or(px(100.));
             let col_idx = i;
 
             header = header.child(
@@ -242,14 +367,15 @@ impl Render for ResultsGrid {
                                 MouseButton::Left,
                                 cx.listener(
                                     move |this, event: &MouseDownEvent, _window, _cx| {
+                                        let width = this
+                                            .tabs
+                                            .get(this.active_tab)
+                                            .and_then(|t| t.column_widths.get(col_idx).copied())
+                                            .unwrap_or(px(100.));
                                         this.resize_state = Some(ColumnResize {
                                             col_idx,
                                             start_x: event.position.x,
-                                            original_width: this
-                                                .column_widths
-                                                .get(col_idx)
-                                                .copied()
-                                                .unwrap_or(px(100.)),
+                                            original_width: width,
                                         });
                                     },
                                 ),
@@ -260,6 +386,8 @@ impl Render for ResultsGrid {
 
         // Trailing spacer fills remaining header width
         header = header.child(div().flex_1().h_full());
+
+        let scroll_handle = tab.scroll_handle.clone();
 
         div()
             .flex()
@@ -279,8 +407,10 @@ impl Render for ResultsGrid {
                         let delta = event.position.x - resize.start_x;
                         let new_width =
                             (resize.original_width + delta).max(px(MIN_COL_WIDTH));
-                        if let Some(w) = this.column_widths.get_mut(resize.col_idx) {
-                            *w = new_width;
+                        if let Some(tab) = this.tabs.get_mut(this.active_tab) {
+                            if let Some(w) = tab.column_widths.get_mut(resize.col_idx) {
+                                *w = new_width;
+                            }
                         }
                         cx.notify();
                     }
@@ -292,6 +422,8 @@ impl Render for ResultsGrid {
                     this.resize_state = None;
                 }),
             )
+            // Tab bar
+            .child(tab_bar)
             // Header row
             .child(header)
             // Data rows (virtual scrolled) with scrollbar
@@ -317,24 +449,30 @@ impl Render for ResultsGrid {
                                     let text_color = theme.foreground;
                                     let muted = theme.muted_foreground;
                                     let number_color: Hsla = gpui::rgb(0xf78c6c).into();
-                                    range
-                                        .map(|ix| {
-                                            this.render_data_row(
-                                                ix,
-                                                bg,
-                                                surface,
-                                                border_color,
-                                                text_color,
-                                                muted,
-                                                number_color,
-                                            )
-                                        })
-                                        .collect()
+                                    let active = this.active_tab;
+                                    if let Some(tab) = this.tabs.get(active) {
+                                        range
+                                            .map(|ix| {
+                                                this.render_data_row(
+                                                    tab,
+                                                    ix,
+                                                    bg,
+                                                    surface,
+                                                    border_color,
+                                                    text_color,
+                                                    muted,
+                                                    number_color,
+                                                )
+                                            })
+                                            .collect()
+                                    } else {
+                                        vec![]
+                                    }
                                 },
                             ),
                         )
                         .h_full()
-                        .track_scroll(self.scroll_handle.clone()),
+                        .track_scroll(scroll_handle.clone()),
                     )
                     // Vertical scrollbar overlay
                     .child(
@@ -346,7 +484,7 @@ impl Render for ResultsGrid {
                             .bottom_0()
                             .w(px(16.))
                             .child(
-                                Scrollbar::vertical(&self.scroll_handle)
+                                Scrollbar::vertical(&scroll_handle)
                                     .scrollbar_show(ScrollbarShow::Always),
                             ),
                     ),

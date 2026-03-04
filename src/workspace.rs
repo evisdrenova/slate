@@ -72,9 +72,9 @@ impl Workspace {
         // Subscribe to query editor events
         cx.subscribe(&query_editor, |this: &mut Self, _, event: &QueryEvent, cx| {
             match event {
-                QueryEvent::QueryExecuted(result) => {
+                QueryEvent::QueryExecuted(result, sql) => {
                     this.results_grid.update(cx, |grid, cx| {
-                        grid.set_result(result.clone(), cx);
+                        grid.add_result(result.clone(), sql, cx);
                     });
                 }
                 QueryEvent::QueryError(_) => {}
@@ -128,7 +128,7 @@ impl Workspace {
                             sidebar.set_db_type(db_type);
                         });
 
-                        // Load schema for AI sidebar too
+                        // Load schema for AI sidebar and query editor autocomplete
                         let db_for_schema = db.clone();
                         let db_name = config.database.clone();
                         cx.spawn(async move |this, cx| {
@@ -142,7 +142,10 @@ impl Workspace {
                             if let Ok(db_schema) = result {
                                 this.update(cx, |this, cx| {
                                     this.ai_sidebar.update(cx, |sidebar, _cx| {
-                                        sidebar.set_schema(db_schema);
+                                        sidebar.set_schema(db_schema.clone());
+                                    });
+                                    this.query_editor.update(cx, |editor, _cx| {
+                                        editor.set_schema(db_schema);
                                     });
                                 }).ok();
                             }
@@ -228,6 +231,30 @@ impl Workspace {
                     this.ai_sidebar.update(cx, |sidebar, _cx| {
                         sidebar.set_db_type(db_type);
                     });
+
+                    // Load schema for AI sidebar and query editor autocomplete
+                    let db_for_schema = db.clone();
+                    let db_name = config.database.clone();
+                    cx.spawn(async move |this, cx| {
+                        let result: Result<crate::db::schema::DatabaseSchema, anyhow::Error> = cx
+                            .background_executor()
+                            .spawn(async move {
+                                schema::fetch_schema(&db_for_schema, &db_name)
+                            })
+                            .await;
+
+                        if let Ok(db_schema) = result {
+                            this.update(cx, |this, cx| {
+                                this.ai_sidebar.update(cx, |sidebar, _cx| {
+                                    sidebar.set_schema(db_schema.clone());
+                                });
+                                this.query_editor.update(cx, |editor, _cx| {
+                                    editor.set_schema(db_schema);
+                                });
+                            }).ok();
+                        }
+                    })
+                    .detach();
 
                     cx.notify();
                 }
@@ -340,9 +367,28 @@ impl Render for Workspace {
                     .border_color(border_color)
                     .child(
                         div()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(status),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .w(px(8.))
+                                    .h(px(8.))
+                                    .rounded_full()
+                                    .bg(if is_connected {
+                                        gpui::rgb(0x4ade80).into()
+                                    } else {
+                                        _muted
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(status),
+                            ),
                     )
                     .child(
                         div()

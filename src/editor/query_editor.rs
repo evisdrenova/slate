@@ -1,20 +1,23 @@
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{CompletionProvider, Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName};
 
 use crate::db::connection::DatabaseService;
+use crate::db::schema::DatabaseSchema;
 use crate::db::types::QueryResult;
+use super::completion::SqlCompletionProvider;
 use super::saved_queries::{self, HistoryEntry, SavedQuery};
 
 actions!(query_editor, [ExecuteQuery, NewTab, CloseTab, SaveQuery, DismissPanel, HistoryPrev, HistoryNext]);
 
 #[derive(Clone)]
 pub enum QueryEvent {
-    QueryExecuted(QueryResult),
+    QueryExecuted(QueryResult, String),
     QueryError(String),
 }
 
@@ -27,6 +30,7 @@ struct QueryTab {
 pub struct QueryEditor {
     focus_handle: FocusHandle,
     sql_input: Entity<InputState>,
+    completion_provider: Rc<SqlCompletionProvider>,
     db: Option<Arc<DatabaseService>>,
     error_message: Option<String>,
     is_executing: bool,
@@ -44,10 +48,14 @@ pub struct QueryEditor {
 
 impl QueryEditor {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let completion_provider = SqlCompletionProvider::new();
+
         let sql_input = cx.new(|cx| {
-            InputState::new(window, cx)
+            let mut state = InputState::new(window, cx)
                 .code_editor("sql")
-                .placeholder("Enter SQL query...")
+                .placeholder("Enter SQL query...");
+            state.lsp.completion_provider = Some(completion_provider.clone() as Rc<dyn CompletionProvider>);
+            state
         });
 
         cx.subscribe(&sql_input, |this: &mut Self, _, event: &InputEvent, cx| {
@@ -67,6 +75,7 @@ impl QueryEditor {
         Self {
             focus_handle: cx.focus_handle(),
             sql_input,
+            completion_provider,
             db: None,
             error_message: None,
             is_executing: false,
@@ -89,6 +98,10 @@ impl QueryEditor {
 
     pub fn set_connection(&mut self, db: Arc<DatabaseService>) {
         self.db = Some(db);
+    }
+
+    pub fn set_schema(&mut self, schema: DatabaseSchema) {
+        self.completion_provider.set_schema(schema);
     }
 
     pub fn set_sql(&mut self, sql: &str, cx: &mut Context<Self>) {
@@ -131,7 +144,7 @@ impl QueryEditor {
                 let success = result.is_ok();
                 match result {
                     Ok(qr) => {
-                        cx.emit(QueryEvent::QueryExecuted(qr));
+                        cx.emit(QueryEvent::QueryExecuted(qr, sql_for_history.clone()));
                     }
                     Err(e) => {
                         this.error_message = Some(e.to_string());
@@ -237,7 +250,6 @@ impl QueryEditor {
     }
 
     fn on_history_prev(&mut self, _: &HistoryPrev, _window: &mut Window, cx: &mut Context<Self>) {
-        eprintln!("[DEBUG] on_history_prev called, history.len()={}", self.history.len());
         if self.history.is_empty() {
             return;
         }
@@ -260,7 +272,6 @@ impl QueryEditor {
     }
 
     fn on_history_next(&mut self, _: &HistoryNext, _window: &mut Window, cx: &mut Context<Self>) {
-        eprintln!("[DEBUG] on_history_next called, cursor={:?}", self.history_cursor);
         let Some(cursor) = self.history_cursor else {
             return;
         };

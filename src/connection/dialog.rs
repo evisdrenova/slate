@@ -45,6 +45,7 @@ pub struct ConnectionDialog {
     database_input: Entity<InputState>,
     status: ConnectionStatus,
     saved_connections: Vec<ConnectionConfig>,
+    editing_connection_id: Option<String>,
     pending_load: Option<ConnectionConfig>,
     pending_port_change: Option<String>,
     pending_uri_parse: Option<ParsedUri>,
@@ -88,6 +89,7 @@ impl ConnectionDialog {
             database_input,
             status: ConnectionStatus::Idle,
             saved_connections: saved,
+            editing_connection_id: None,
             pending_load: None,
             pending_port_change: None,
             pending_uri_parse: None,
@@ -191,7 +193,11 @@ impl ConnectionDialog {
         self.status = ConnectionStatus::Connecting;
         cx.notify();
 
-        let config = self.build_config(cx);
+        let mut config = self.build_config(cx);
+        // Preserve original ID if editing an existing connection
+        if let Some(ref existing_id) = self.editing_connection_id {
+            config.id = existing_id.clone();
+        }
         let password = self.password_input.read(cx).value().to_string();
 
         cx.spawn(async move |this, cx| {
@@ -205,9 +211,9 @@ impl ConnectionDialog {
             this.update(cx, |this, cx| match result {
                 Ok(db) => {
                     this.status = ConnectionStatus::Connected;
-                    // Save connection
+                    // Save connection — retain by both name and ID to avoid duplicates
                     let mut conns = this.saved_connections.clone();
-                    conns.retain(|c| c.name != config.name);
+                    conns.retain(|c| c.name != config.name && c.id != config.id);
                     conns.push(config.clone());
                     let _ = crate::connection::store::save_connections(&conns);
                     let _ = crate::connection::store::save_password(&config.id, &password);
@@ -226,8 +232,19 @@ impl ConnectionDialog {
 
     fn load_saved_connection(&mut self, config: &ConnectionConfig, cx: &mut Context<Self>) {
         self.db_type = config.db_type;
+        self.editing_connection_id = Some(config.id.clone());
         self.pending_load = Some(config.clone());
+        self.status = ConnectionStatus::Idle;
         cx.notify();
+    }
+
+    fn delete_saved_connection(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if idx < self.saved_connections.len() {
+            let config = self.saved_connections.remove(idx);
+            let _ = crate::connection::store::delete_password(&config.id);
+            let _ = crate::connection::store::save_connections(&self.saved_connections);
+            cx.notify();
+        }
     }
 
     fn apply_pending_load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -384,8 +401,13 @@ impl Render for ConnectionDialog {
                             )
                             .children(saved.iter().enumerate().map(|(idx, conn)| {
                                 let config = conn.clone();
+                                let error_color = theme.danger;
                                 div()
                                     .id(("saved", idx))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(4.))
                                     .px_2()
                                     .py_1()
                                     .rounded_md()
@@ -396,7 +418,28 @@ impl Render for ConnectionDialog {
                                     .on_click(cx.listener(move |this, _, _window, cx| {
                                         this.load_saved_connection(&config, cx);
                                     }))
-                                    .child(conn.name.clone())
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .overflow_x_hidden()
+                                            .text_ellipsis()
+                                            .child(conn.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("del-conn", idx))
+                                            .cursor_pointer()
+                                            .text_size(px(10.))
+                                            .text_color(muted)
+                                            .hover(|el| el.text_color(error_color))
+                                            .rounded_sm()
+                                            .px(px(3.))
+                                            .py(px(1.))
+                                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                                this.delete_saved_connection(idx, cx);
+                                            }))
+                                            .child("×"),
+                                    )
                             })),
                     )
                     // Connection form
@@ -420,7 +463,11 @@ impl Render for ConnectionDialog {
                                             .text_size(px(16.))
                                             .text_color(text_color)
                                             .font_weight(FontWeight::BOLD)
-                                            .child("New Connection"),
+                                            .child(if self.editing_connection_id.is_some() {
+                                                "Edit Connection"
+                                            } else {
+                                                "New Connection"
+                                            }),
                                     )
                                     .child(
                                         Button::new("close-dialog-btn")
