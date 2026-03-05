@@ -369,17 +369,23 @@ impl Render for ResultsGrid {
                             .overflow_x_hidden()
                             .child(col.name.clone()),
                     )
-                    // Info icon — visible on hover or when popover is open
+                    // Info icon — subtle normally, full opacity on header hover or when popover open
                     .child(
                         div()
                             .id(ElementId::Name(format!("col-info-{}", i).into()))
                             .flex_shrink_0()
                             .cursor_pointer()
                             .rounded_sm()
-                            .p(px(1.))
+                            .size(px(16.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(open_info_idx == Some(i), |el| {
+                                el.bg(surface)
+                            })
                             .when(open_info_idx != Some(i), |el| {
-                                el.opacity(0.0)
-                                    .group_hover("col-header", |el| el.opacity(1.0))
+                                el.opacity(0.15)
+                                    .group_hover("col-header", |el| el.opacity(0.7))
                             })
                             .hover(|el| el.bg(surface))
                             .on_click(cx.listener(move |this, _, _window, cx| {
@@ -392,11 +398,11 @@ impl Render for ResultsGrid {
                             }))
                             .child(
                                 Icon::new(IconName::Info)
-                                    .with_size(px(11.))
+                                    .with_size(px(12.))
                                     .text_color(muted),
                             ),
                     )
-                    // Resize drag handle
+                    // Resize drag handle — on left edge to avoid overlapping info icon
                     .child(
                         div()
                             .id(ElementId::Name(format!("col-resize-{}", i).into()))
@@ -404,7 +410,7 @@ impl Render for ResultsGrid {
                             .right_0()
                             .top_0()
                             .h_full()
-                            .w(px(6.))
+                            .w(px(4.))
                             .cursor_col_resize()
                             .hover(|el| el.bg(resize_hover))
                             .on_mouse_down(
@@ -461,7 +467,7 @@ impl Render for ResultsGrid {
 
                 let mut popover = div()
                     .absolute()
-                    .top(px(28.)) // below header
+                    .top(px(56.)) // below tab bar (28) + header (28)
                     .left(x_offset)
                     .w(px(220.))
                     .bg(bg)
@@ -573,6 +579,7 @@ impl Render for ResultsGrid {
             .flex()
             .flex_col()
             .flex_1()
+            .relative()
             .bg(bg)
             // Show col-resize cursor across the whole grid while dragging
             .when(is_resizing, |el| el.cursor_col_resize())
@@ -604,14 +611,8 @@ impl Render for ResultsGrid {
             )
             // Tab bar
             .child(tab_bar)
-            // Header row + info popover
-            .child(
-                div()
-                    .relative()
-                    .flex_shrink_0()
-                    .child(header)
-                    .when_some(column_info_popover, |el, popover| el.child(popover)),
-            )
+            // Header row
+            .child(header)
             // Data rows (virtual scrolled) with scrollbar
             .child(
                 div()
@@ -693,5 +694,7 @@ impl Render for ResultsGrid {
                         affected, exec_time, col_count
                     )),
             )
+            // Column info popover overlay — rendered last so it paints on top
+            .when_some(column_info_popover, |el, popover| el.child(popover))
     }
 }
