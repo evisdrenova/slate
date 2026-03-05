@@ -1,8 +1,9 @@
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::scroll::{Scrollbar, ScrollbarShow};
-use gpui_component::ActiveTheme;
+use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 
+use crate::db::schema::DatabaseSchema;
 use crate::db::types::{CellValue, QueryResult};
 
 const MIN_COL_WIDTH: f32 = 40.0;
@@ -28,6 +29,8 @@ pub struct ResultsGrid {
     active_tab: usize,
     next_tab_id: usize,
     resize_state: Option<ColumnResize>,
+    schema: Option<DatabaseSchema>,
+    column_info_idx: Option<usize>,
 }
 
 impl ResultsGrid {
@@ -38,6 +41,8 @@ impl ResultsGrid {
             active_tab: 0,
             next_tab_id: 1,
             resize_state: None,
+            schema: None,
+            column_info_idx: None,
         }
     }
 
@@ -53,8 +58,8 @@ impl ResultsGrid {
             })
             .collect();
 
-        let title = if sql.len() > 20 {
-            format!("{}...", &sql[..20])
+        let title = if sql.len() > 30 {
+            format!("{}...", &sql[..30])
         } else if sql.is_empty() {
             format!("Result {}", self.next_tab_id)
         } else {
@@ -90,6 +95,10 @@ impl ResultsGrid {
         cx.notify();
     }
 
+    pub fn set_schema(&mut self, schema: DatabaseSchema) {
+        self.schema = Some(schema);
+    }
+
     fn close_tab(&mut self, idx: usize, cx: &mut Context<Self>) {
         if idx >= self.tabs.len() {
             return;
@@ -110,6 +119,7 @@ impl ResultsGrid {
     fn switch_tab(&mut self, idx: usize, cx: &mut Context<Self>) {
         if idx < self.tabs.len() {
             self.active_tab = idx;
+            self.column_info_idx = None;
             cx.notify();
         }
     }
@@ -228,8 +238,9 @@ impl Render for ResultsGrid {
 
         let active_tab = self.active_tab;
 
-        // Tab bar
+        // Tab bar (scrollable)
         let mut tab_bar = div()
+            .id("results-tab-bar")
             .flex()
             .flex_row()
             .items_center()
@@ -239,7 +250,7 @@ impl Render for ResultsGrid {
             .border_color(border_color)
             .px_1()
             .gap(px(1.))
-            .overflow_x_hidden();
+            .overflow_x_scroll();
 
         for (idx, tab) in self.tabs.iter().enumerate() {
             let is_active = idx == active_tab;
@@ -258,7 +269,7 @@ impl Render for ResultsGrid {
                 .cursor_pointer()
                 .text_size(px(11.))
                 .flex_shrink_0()
-                .max_w(px(160.))
+                .max_w(px(220.))
                 .when(is_active, |el| el.bg(surface).text_color(text_color))
                 .when(!is_active, |el| {
                     el.text_color(muted)
@@ -328,12 +339,14 @@ impl Render for ResultsGrid {
 
         // Data column headers with resize handles
         let resize_hover = Hsla { a: 0.5, ..accent };
+        let open_info_idx = self.column_info_idx;
         for (i, col) in tab.result.columns.iter().enumerate() {
             let width = tab.column_widths.get(i).copied().unwrap_or(px(100.));
             let col_idx = i;
 
             header = header.child(
                 div()
+                    .id(ElementId::Name(format!("col-header-{}", i).into()))
                     .flex_shrink_0()
                     .relative()
                     .w(width)
@@ -341,16 +354,47 @@ impl Render for ResultsGrid {
                     .flex()
                     .items_center()
                     .px_2()
+                    .gap(px(2.))
                     .border_r_1()
                     .border_color(border_color)
                     .overflow_x_hidden()
+                    .group("col-header")
                     .child(
                         div()
+                            .flex_1()
                             .text_size(px(12.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(text_color)
                             .text_ellipsis()
+                            .overflow_x_hidden()
                             .child(col.name.clone()),
+                    )
+                    // Info icon — visible on hover or when popover is open
+                    .child(
+                        div()
+                            .id(ElementId::Name(format!("col-info-{}", i).into()))
+                            .flex_shrink_0()
+                            .cursor_pointer()
+                            .rounded_sm()
+                            .p(px(1.))
+                            .when(open_info_idx != Some(i), |el| {
+                                el.opacity(0.0)
+                                    .group_hover("col-header", |el| el.opacity(1.0))
+                            })
+                            .hover(|el| el.bg(surface))
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                if this.column_info_idx == Some(col_idx) {
+                                    this.column_info_idx = None;
+                                } else {
+                                    this.column_info_idx = Some(col_idx);
+                                }
+                                cx.notify();
+                            }))
+                            .child(
+                                Icon::new(IconName::Info)
+                                    .with_size(px(11.))
+                                    .text_color(muted),
+                            ),
                     )
                     // Resize drag handle
                     .child(
@@ -386,6 +430,142 @@ impl Render for ResultsGrid {
 
         // Trailing spacer fills remaining header width
         header = header.child(div().flex_1().h_full());
+
+        // Column info popover
+        let column_info_popover = if let Some(info_idx) = self.column_info_idx {
+            let tab = &self.tabs[self.active_tab];
+            if let Some(col) = tab.result.columns.get(info_idx) {
+                // Calculate x offset: 70px row-number col + sum of widths before this col
+                let col_widths_sum: Pixels = tab
+                    .column_widths
+                    .iter()
+                    .take(info_idx)
+                    .copied()
+                    .fold(px(0.), |a, b| a + b);
+                let x_offset = px(70.) + col_widths_sum;
+
+                let col_name = col.name.clone();
+                let col_type = col.type_name.clone();
+
+                // Look up schema info
+                let schema_info = self.schema.as_ref().and_then(|schema| {
+                    for table in &schema.tables {
+                        for c in &table.columns {
+                            if c.name == col_name {
+                                return Some(c.clone());
+                            }
+                        }
+                    }
+                    None
+                });
+
+                let mut popover = div()
+                    .absolute()
+                    .top(px(28.)) // below header
+                    .left(x_offset)
+                    .w(px(220.))
+                    .bg(bg)
+                    .border_1()
+                    .border_color(border_color)
+                    .rounded_md()
+                    .shadow_md()
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .text_size(px(11.))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .text_size(px(12.))
+                            .text_color(text_color)
+                            .child(col_name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(muted)
+                                    .child("Type:"),
+                            )
+                            .child(
+                                div()
+                                    .text_color(text_color)
+                                    .child(if col_type.is_empty() {
+                                        "unknown".to_string()
+                                    } else {
+                                        col_type
+                                    }),
+                            ),
+                    );
+
+                if let Some(info) = schema_info {
+                    popover = popover
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(muted)
+                                        .child("Nullable:"),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(text_color)
+                                        .child(if info.is_nullable { "Yes" } else { "No" }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(muted)
+                                        .child("Primary Key:"),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(text_color)
+                                        .child(if info.is_primary_key { "Yes" } else { "No" }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(muted)
+                                        .child("Default:"),
+                                )
+                                .child(
+                                    div().text_color(text_color).child(
+                                        info.default_value
+                                            .unwrap_or_else(|| "none".to_string()),
+                                    ),
+                                ),
+                        );
+                }
+
+                Some(popover)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         let scroll_handle = tab.scroll_handle.clone();
 
@@ -424,8 +604,14 @@ impl Render for ResultsGrid {
             )
             // Tab bar
             .child(tab_bar)
-            // Header row
-            .child(header)
+            // Header row + info popover
+            .child(
+                div()
+                    .relative()
+                    .flex_shrink_0()
+                    .child(header)
+                    .when_some(column_info_popover, |el, popover| el.child(popover)),
+            )
             // Data rows (virtual scrolled) with scrollbar
             .child(
                 div()

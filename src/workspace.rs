@@ -219,7 +219,10 @@ impl Workspace {
                         sidebar.set_schema(db_schema.clone());
                     });
                     this.query_editor.update(cx, |editor, _cx| {
-                        editor.set_schema(db_schema);
+                        editor.set_schema(db_schema.clone());
+                    });
+                    this.results_grid.update(cx, |grid, _cx| {
+                        grid.set_schema(db_schema);
                     });
                 }).ok();
             }
