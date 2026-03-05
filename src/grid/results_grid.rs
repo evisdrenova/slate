@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::scroll::{Scrollbar, ScrollbarShow};
@@ -33,6 +35,9 @@ pub struct ResultsGrid {
     schema: Option<DatabaseSchema>,
     column_info_idx: Option<usize>,
     detail_cell: Option<(usize, usize)>, // (row_idx, col_idx) for detail panel
+    selected_cell: Option<(usize, usize)>, // (row_idx, col_idx) for highlight
+    json_collapsed: HashSet<String>,       // collapsed JSON tree paths (expanded by default)
+    initial_render_ms: Option<f64>,        // set once on first render with results
 }
 
 impl ResultsGrid {
@@ -46,6 +51,9 @@ impl ResultsGrid {
             schema: None,
             column_info_idx: None,
             detail_cell: None,
+            selected_cell: None,
+            json_collapsed: HashSet::new(),
+            initial_render_ms: None,
         }
     }
 
@@ -81,6 +89,8 @@ impl ResultsGrid {
 
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
+        self.initial_render_ms = None;
+        self.json_collapsed.clear();
 
         // Cap at MAX_TABS by removing oldest
         while self.tabs.len() > MAX_TABS {
@@ -128,6 +138,248 @@ impl ResultsGrid {
         }
     }
 
+    fn collect_json_paths(value: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                out.push(path.to_string());
+                for (key, val) in map {
+                    Self::collect_json_paths(val, &format!("{}.{}", path, key), out);
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                out.push(path.to_string());
+                for (i, val) in arr.iter().enumerate() {
+                    Self::collect_json_paths(val, &format!("{}[{}]", path, i), out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn render_json_tree(&self, value: &serde_json::Value, path: &str, depth: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.theme();
+        let text_color = theme.foreground;
+        let muted = theme.muted_foreground;
+        let accent = theme.primary;
+        let string_color: Hsla = gpui::rgb(0x89dceb).into();
+        let number_color: Hsla = gpui::rgb(0xf78c6c).into();
+        let indent = px(16. * depth as f32);
+
+        match value {
+            serde_json::Value::Object(map) => {
+                let is_expanded = !self.json_collapsed.contains(path);
+                let path_owned = path.to_string();
+                let summary = format!("{{{} keys}}", map.len());
+                let icon = if is_expanded { IconName::ChevronDown } else { IconName::ChevronRight };
+
+                let mut rows: Vec<AnyElement> = vec![
+                    div()
+                        .id(ElementId::Name(format!("json-{}", path).into()))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.))
+                        .pl(indent)
+                        .py(px(1.))
+                        .cursor_pointer()
+                        .hover(|el| el.bg(theme.secondary))
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            if this.json_collapsed.contains(&path_owned) {
+                                this.json_collapsed.remove(&path_owned);
+                            } else {
+                                this.json_collapsed.insert(path_owned.clone());
+                            }
+                            cx.notify();
+                        }))
+                        .child(Icon::new(icon).with_size(px(12.)).text_color(muted))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(muted)
+                                .child(summary),
+                        )
+                        .into_any_element(),
+                ];
+
+                if is_expanded {
+                    for (key, val) in map {
+                        let child_path = format!("{}.{}", path, key);
+                        match val {
+                            serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                                rows.push(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(4.))
+                                        .pl(px(16. * (depth + 1) as f32))
+                                        .py(px(1.))
+                                        .child(
+                                            div()
+                                                .text_size(px(12.))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(text_color)
+                                                .child(format!("{}:", key)),
+                                        )
+                                        .into_any_element(),
+                                );
+                                rows.extend(self.render_json_tree(val, &child_path, depth + 1, cx));
+                            }
+                            _ => {
+                                let val_el = self.render_json_primitive(val, string_color, number_color, accent, muted);
+                                rows.push(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(4.))
+                                        .pl(px(16. * (depth + 1) as f32))
+                                        .py(px(1.))
+                                        .child(
+                                            div()
+                                                .text_size(px(12.))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(text_color)
+                                                .child(format!("{}:", key)),
+                                        )
+                                        .child(val_el)
+                                        .into_any_element(),
+                                );
+                            }
+                        }
+                    }
+                }
+                rows
+            }
+            serde_json::Value::Array(arr) => {
+                let is_expanded = !self.json_collapsed.contains(path);
+                let path_owned = path.to_string();
+                let summary = format!("[{} items]", arr.len());
+                let icon = if is_expanded { IconName::ChevronDown } else { IconName::ChevronRight };
+
+                let mut rows: Vec<AnyElement> = vec![
+                    div()
+                        .id(ElementId::Name(format!("json-{}", path).into()))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.))
+                        .pl(indent)
+                        .py(px(1.))
+                        .cursor_pointer()
+                        .hover(|el| el.bg(theme.secondary))
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            if this.json_collapsed.contains(&path_owned) {
+                                this.json_collapsed.remove(&path_owned);
+                            } else {
+                                this.json_collapsed.insert(path_owned.clone());
+                            }
+                            cx.notify();
+                        }))
+                        .child(Icon::new(icon).with_size(px(12.)).text_color(muted))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(muted)
+                                .child(summary),
+                        )
+                        .into_any_element(),
+                ];
+
+                if is_expanded {
+                    for (i, val) in arr.iter().enumerate() {
+                        let child_path = format!("{}[{}]", path, i);
+                        match val {
+                            serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                                rows.push(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(4.))
+                                        .pl(px(16. * (depth + 1) as f32))
+                                        .py(px(1.))
+                                        .child(
+                                            div()
+                                                .text_size(px(12.))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(text_color)
+                                                .child(format!("[{}]:", i)),
+                                        )
+                                        .into_any_element(),
+                                );
+                                rows.extend(self.render_json_tree(val, &child_path, depth + 1, cx));
+                            }
+                            _ => {
+                                let val_el = self.render_json_primitive(val, string_color, number_color, accent, muted);
+                                rows.push(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(4.))
+                                        .pl(px(16. * (depth + 1) as f32))
+                                        .py(px(1.))
+                                        .child(
+                                            div()
+                                                .text_size(px(12.))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(text_color)
+                                                .child(format!("[{}]:", i)),
+                                        )
+                                        .child(val_el)
+                                        .into_any_element(),
+                                );
+                            }
+                        }
+                    }
+                }
+                rows
+            }
+            _ => {
+                let val_el = self.render_json_primitive(value, string_color, number_color, accent, muted);
+                vec![
+                    div()
+                        .pl(indent)
+                        .py(px(1.))
+                        .child(val_el)
+                        .into_any_element(),
+                ]
+            }
+        }
+    }
+
+    fn render_json_primitive(&self, value: &serde_json::Value, string_color: Hsla, number_color: Hsla, accent: Hsla, muted: Hsla) -> Div {
+        match value {
+            serde_json::Value::String(s) => {
+                div()
+                    .text_size(px(12.))
+                    .text_color(string_color)
+                    .child(format!("\"{}\"", s))
+            }
+            serde_json::Value::Number(n) => {
+                div()
+                    .text_size(px(12.))
+                    .text_color(number_color)
+                    .child(n.to_string())
+            }
+            serde_json::Value::Bool(b) => {
+                div()
+                    .text_size(px(12.))
+                    .text_color(accent)
+                    .child(b.to_string())
+            }
+            serde_json::Value::Null => {
+                div()
+                    .text_size(px(12.))
+                    .text_color(muted)
+                    .italic()
+                    .child("null")
+            }
+            _ => div().text_size(px(12.)).child(value.to_string()),
+        }
+    }
+
     fn render_data_row(
         &self,
         tab: &ResultTab,
@@ -171,6 +423,9 @@ impl ResultsGrid {
                 .child(format!("{}", row_idx + 1)),
         );
 
+        let selected = self.selected_cell;
+        let accent = cx.theme().primary;
+
         for (i, cell) in row.cells.iter().enumerate() {
             let width = tab
                 .column_widths
@@ -185,6 +440,7 @@ impl ResultsGrid {
             };
 
             let is_null = cell.is_null();
+            let is_selected = selected == Some((row_idx, i));
             let ri = row_idx;
             let ci = i;
 
@@ -205,12 +461,14 @@ impl ResultsGrid {
                     .text_color(color)
                     .when(is_null, |el| el.italic())
                     .when(cell.is_numeric(), |el| el.justify_end())
+                    .when(is_selected, |el| el.bg(accent.opacity(0.15)))
                     .overflow_x_hidden()
                     .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
                         if event.click_count() == 2 {
                             this.detail_cell = Some((ri, ci));
-                            cx.notify();
                         }
+                        this.selected_cell = Some((ri, ci));
+                        cx.notify();
                     }))
                     .child(text),
             );
@@ -608,15 +866,123 @@ impl Render for ResultsGrid {
                 let raw = row.cells.get(col_idx).map(|c| c.display()).unwrap_or_default();
                 let col_name = col.name.clone();
 
-                // Try to pretty-print as JSON
-                let display_text = if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&raw) {
-                    serde_json::to_string_pretty(&json_val).unwrap_or(raw.clone())
+                // Build content: JSON tree or plain text
+                let json_parsed = serde_json::from_str::<serde_json::Value>(&raw).ok();
+                let is_json = json_parsed.is_some();
+
+                let content = if let Some(ref json_val) = json_parsed {
+                    let tree_rows = self.render_json_tree(json_val, "root", 0, cx);
+                    div()
+                        .flex()
+                        .flex_col()
+                        .font_family("Monaco")
+                        .children(tree_rows)
                 } else {
-                    raw
+                    div()
+                        .text_size(px(12.))
+                        .text_color(text_color)
+                        .font_family("Monaco")
+                        .whitespace_nowrap()
+                        .child(raw)
                 };
+
+                // Collect all collapsible paths for collapse-all
+                let all_paths = if let Some(ref json_val) = json_parsed {
+                    let mut paths = Vec::new();
+                    Self::collect_json_paths(json_val, "root", &mut paths);
+                    paths
+                } else {
+                    Vec::new()
+                };
+
+                let header_row = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(32.))
+                    .px_3()
+                    .bg(surface)
+                    .border_b_1()
+                    .border_color(border_color)
+                    .flex_shrink_0()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(text_color)
+                            .child(format!("Row {} \u{00b7} {}", row_idx + 1, col_name)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(4.))
+                            .when(is_json, |el| {
+                                el.child(
+                                    div()
+                                        .id("detail-expand-all")
+                                        .cursor_pointer()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size(px(20.))
+                                        .rounded_sm()
+                                        .hover(|el| el.bg(bg))
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.json_collapsed.clear();
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            Icon::new(IconName::Maximize)
+                                                .with_size(px(12.))
+                                                .text_color(muted),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("detail-collapse-all")
+                                        .cursor_pointer()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size(px(20.))
+                                        .rounded_sm()
+                                        .hover(|el| el.bg(bg))
+                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                            for p in &all_paths {
+                                                this.json_collapsed.insert(p.clone());
+                                            }
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            Icon::new(IconName::Minimize)
+                                                .with_size(px(12.))
+                                                .text_color(muted),
+                                        ),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .id("detail-close")
+                                    .cursor_pointer()
+                                    .text_size(px(14.))
+                                    .text_color(muted)
+                                    .hover(|el| el.text_color(error_color))
+                                    .px(px(4.))
+                                    .rounded_sm()
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        this.detail_cell = None;
+                                        cx.notify();
+                                    }))
+                                    .child("\u{00d7}"),
+                            ),
+                    );
 
                 Some(
                     div()
+                        .occlude()
                         .absolute()
                         .top_0()
                         .right_0()
@@ -629,42 +995,7 @@ impl Render for ResultsGrid {
                         .flex()
                         .flex_col()
                         .overflow_hidden()
-                        // Header
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .h(px(32.))
-                                .px_3()
-                                .bg(surface)
-                                .border_b_1()
-                                .border_color(border_color)
-                                .flex_shrink_0()
-                                .child(
-                                    div()
-                                        .text_size(px(12.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(text_color)
-                                        .child(format!("Row {} \u{00b7} {}", row_idx + 1, col_name)),
-                                )
-                                .child(
-                                    div()
-                                        .id("detail-close")
-                                        .cursor_pointer()
-                                        .text_size(px(14.))
-                                        .text_color(muted)
-                                        .hover(|el| el.text_color(error_color))
-                                        .px(px(4.))
-                                        .rounded_sm()
-                                        .on_click(cx.listener(|this, _, _window, cx| {
-                                            this.detail_cell = None;
-                                            cx.notify();
-                                        }))
-                                        .child("\u{00d7}"),
-                                ),
-                        )
+                        .child(header_row)
                         // Content
                         .child(
                             div()
@@ -672,14 +1003,7 @@ impl Render for ResultsGrid {
                                 .flex_1()
                                 .overflow_y_scroll()
                                 .p_3()
-                                .child(
-                                    div()
-                                        .text_size(px(12.))
-                                        .text_color(text_color)
-                                        .font_family("Monaco")
-                                        .whitespace_nowrap()
-                                        .child(display_text),
-                                ),
+                                .child(content),
                         ),
                 )
             } else {
@@ -692,7 +1016,7 @@ impl Render for ResultsGrid {
         let scroll_handle = tab.scroll_handle.clone();
         let h_scroll_handle = tab.h_scroll_handle.clone();
 
-        div()
+        let result = div()
             .flex()
             .flex_col()
             .flex_1()
@@ -863,13 +1187,20 @@ impl Render for ResultsGrid {
                         "{} rows \u{00b7} query: {}ms \u{00b7} render: {:.1}ms \u{00b7} {} columns",
                         affected,
                         exec_time,
-                        render_start.elapsed().as_secs_f64() * 1000.0,
+                        self.initial_render_ms.unwrap_or(0.0),
                         col_count
                     )),
             )
             // Column info popover overlay — rendered last so it paints on top
             .when_some(column_info_popover, |el, popover| el.child(popover))
             // Detail panel overlay
-            .when_some(detail_panel, |el, panel| el.child(panel))
+            .when_some(detail_panel, |el, panel| el.child(panel));
+
+        // Capture initial render time once
+        if self.initial_render_ms.is_none() {
+            self.initial_render_ms = Some(render_start.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        result
     }
 }
