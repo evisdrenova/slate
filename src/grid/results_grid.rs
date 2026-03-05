@@ -21,6 +21,7 @@ struct ResultTab {
     result: QueryResult,
     column_widths: Vec<Pixels>,
     scroll_handle: UniformListScrollHandle,
+    h_scroll_handle: ScrollHandle,
 }
 
 pub struct ResultsGrid {
@@ -31,6 +32,7 @@ pub struct ResultsGrid {
     resize_state: Option<ColumnResize>,
     schema: Option<DatabaseSchema>,
     column_info_idx: Option<usize>,
+    detail_cell: Option<(usize, usize)>, // (row_idx, col_idx) for detail panel
 }
 
 impl ResultsGrid {
@@ -43,6 +45,7 @@ impl ResultsGrid {
             resize_state: None,
             schema: None,
             column_info_idx: None,
+            detail_cell: None,
         }
     }
 
@@ -58,8 +61,8 @@ impl ResultsGrid {
             })
             .collect();
 
-        let title = if sql.len() > 30 {
-            format!("{}...", &sql[..30])
+        let title = if sql.chars().count() > 30 {
+            format!("{}...", sql.chars().take(30).collect::<String>())
         } else if sql.is_empty() {
             format!("Result {}", self.next_tab_id)
         } else {
@@ -72,6 +75,7 @@ impl ResultsGrid {
             result,
             column_widths,
             scroll_handle: UniformListScrollHandle::new(),
+            h_scroll_handle: ScrollHandle::new(),
         };
         self.next_tab_id += 1;
 
@@ -134,6 +138,8 @@ impl ResultsGrid {
         text_color: Hsla,
         muted: Hsla,
         number_color: Hsla,
+        content_width: Pixels,
+        cx: &mut Context<Self>,
     ) -> Div {
         let row = &tab.result.rows[row_idx];
         let is_even = row_idx % 2 == 0;
@@ -144,7 +150,7 @@ impl ResultsGrid {
             .flex_row()
             .h(px(24.))
             .bg(row_bg)
-            .w_full()
+            .min_w(content_width)
             .border_b_1()
             .border_color(border_color);
 
@@ -179,9 +185,14 @@ impl ResultsGrid {
             };
 
             let is_null = cell.is_null();
+            let ri = row_idx;
+            let ci = i;
 
             row_div = row_div.child(
                 div()
+                    .id(ElementId::Name(
+                        format!("cell-{}-{}", row_idx, i).into(),
+                    ))
                     .flex_shrink_0()
                     .w(width)
                     .h_full()
@@ -195,12 +206,18 @@ impl ResultsGrid {
                     .when(is_null, |el| el.italic())
                     .when(cell.is_numeric(), |el| el.justify_end())
                     .overflow_x_hidden()
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
+                        if event.click_count() == 2 {
+                            this.detail_cell = Some((ri, ci));
+                            cx.notify();
+                        }
+                    }))
                     .child(text),
             );
         }
 
-        // Trailing spacer fills remaining width
-        row_div = row_div.child(div().flex_1().h_full());
+        // Trailing spacer with padding after last column
+        row_div = row_div.child(div().w(px(32.)).flex_shrink_0().h_full());
 
         row_div
     }
@@ -214,6 +231,7 @@ impl Focusable for ResultsGrid {
 
 impl Render for ResultsGrid {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let render_start = std::time::Instant::now();
         let theme = cx.theme();
         let bg = theme.background;
         let surface = theme.secondary;
@@ -281,6 +299,7 @@ impl Render for ResultsGrid {
                 .child(
                     div()
                         .overflow_x_hidden()
+                        .whitespace_nowrap()
                         .text_ellipsis()
                         .child(title),
                 );
@@ -310,12 +329,17 @@ impl Render for ResultsGrid {
         let col_count = tab.result.columns.len();
         let is_resizing = self.resize_state.is_some();
 
+        // Total content width for horizontal scrolling (row num + columns + trailing pad)
+        let total_content_width = px(70.)
+            + tab.column_widths.iter().copied().fold(px(0.), |a, b| a + b)
+            + px(32.);
+
         // Build header row with resize handles
         let mut header = div()
             .flex()
             .flex_row()
             .flex_shrink_0()
-            .w_full()
+            .min_w(total_content_width)
             .h(px(28.))
             .bg(surface)
             .border_b_1()
@@ -365,6 +389,7 @@ impl Render for ResultsGrid {
                             .text_size(px(12.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(text_color)
+                            .whitespace_nowrap()
                             .text_ellipsis()
                             .overflow_x_hidden()
                             .child(col.name.clone()),
@@ -434,8 +459,8 @@ impl Render for ResultsGrid {
             );
         }
 
-        // Trailing spacer fills remaining header width
-        header = header.child(div().flex_1().h_full());
+        // Trailing spacer with padding after last column
+        header = header.child(div().w(px(32.)).flex_shrink_0().h_full());
 
         // Column info popover
         let column_info_popover = if let Some(info_idx) = self.column_info_idx {
@@ -573,7 +598,99 @@ impl Render for ResultsGrid {
             None
         };
 
+        // Detail panel for cell value inspection
+        let detail_panel = if let Some((row_idx, col_idx)) = self.detail_cell {
+            let tab = &self.tabs[self.active_tab];
+            if let (Some(row), Some(col)) = (
+                tab.result.rows.get(row_idx),
+                tab.result.columns.get(col_idx),
+            ) {
+                let raw = row.cells.get(col_idx).map(|c| c.display()).unwrap_or_default();
+                let col_name = col.name.clone();
+
+                // Try to pretty-print as JSON
+                let display_text = if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    serde_json::to_string_pretty(&json_val).unwrap_or(raw.clone())
+                } else {
+                    raw
+                };
+
+                Some(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .bottom_0()
+                        .w(px(340.))
+                        .bg(bg)
+                        .border_l_1()
+                        .border_color(border_color)
+                        .shadow_md()
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        // Header
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .h(px(32.))
+                                .px_3()
+                                .bg(surface)
+                                .border_b_1()
+                                .border_color(border_color)
+                                .flex_shrink_0()
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(text_color)
+                                        .child(format!("Row {} \u{00b7} {}", row_idx + 1, col_name)),
+                                )
+                                .child(
+                                    div()
+                                        .id("detail-close")
+                                        .cursor_pointer()
+                                        .text_size(px(14.))
+                                        .text_color(muted)
+                                        .hover(|el| el.text_color(error_color))
+                                        .px(px(4.))
+                                        .rounded_sm()
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.detail_cell = None;
+                                            cx.notify();
+                                        }))
+                                        .child("\u{00d7}"),
+                                ),
+                        )
+                        // Content
+                        .child(
+                            div()
+                                .id("detail-content")
+                                .flex_1()
+                                .overflow_y_scroll()
+                                .p_3()
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(text_color)
+                                        .font_family("Monaco")
+                                        .whitespace_nowrap()
+                                        .child(display_text),
+                                ),
+                        ),
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let scroll_handle = tab.scroll_handle.clone();
+        let h_scroll_handle = tab.h_scroll_handle.clone();
 
         div()
             .flex()
@@ -611,57 +728,96 @@ impl Render for ResultsGrid {
             )
             // Tab bar
             .child(tab_bar)
-            // Header row
-            .child(header)
-            // Data rows (virtual scrolled) with scrollbar
+            // Header + data area wrapper (relative for scrollbar overlays)
             .child(
                 div()
-                    .id("results-scroll-area")
                     .flex_1()
                     .relative()
                     .overflow_hidden()
-                    .child(
-                        uniform_list(
-                            "results-grid",
-                            row_count,
-                            cx.processor(
-                                move |this: &mut Self,
-                                      range: std::ops::Range<usize>,
-                                      _window: &mut Window,
-                                      cx: &mut Context<Self>| {
-                                    let theme = cx.theme();
-                                    let bg = theme.background;
-                                    let surface = theme.secondary;
-                                    let border_color = theme.border;
-                                    let text_color = theme.foreground;
-                                    let muted = theme.muted_foreground;
-                                    let number_color: Hsla = gpui::rgb(0xf78c6c).into();
-                                    let active = this.active_tab;
-                                    if let Some(tab) = this.tabs.get(active) {
-                                        range
-                                            .map(|ix| {
-                                                this.render_data_row(
-                                                    tab,
-                                                    ix,
-                                                    bg,
-                                                    surface,
-                                                    border_color,
-                                                    text_color,
-                                                    muted,
-                                                    number_color,
+                    // Horizontally scrollable content
+                    .child({
+                        let mut h_scroll = div()
+                            .id("results-h-scroll")
+                            .size_full()
+                            .overflow_x_scroll()
+                            .overflow_y_hidden()
+                            .track_scroll(&h_scroll_handle);
+                        h_scroll.interactivity().base_style.restrict_scroll_to_axis = Some(true);
+                        h_scroll.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .min_w(total_content_width)
+                                    .h_full()
+                                    // Header row
+                                    .child(header)
+                                    // Data rows (virtual scrolled)
+                                    .child(
+                                        div()
+                                            .id("results-scroll-area")
+                                            .flex_1()
+                                            .relative()
+                                            .overflow_hidden()
+                                            .child(
+                                                uniform_list(
+                                                    "results-grid",
+                                                    row_count,
+                                                    cx.processor(
+                                                        move |this: &mut Self,
+                                                              range: std::ops::Range<usize>,
+                                                              _window: &mut Window,
+                                                              cx: &mut Context<Self>| {
+                                                            let theme = cx.theme();
+                                                            let bg = theme.background;
+                                                            let surface = theme.secondary;
+                                                            let border_color = theme.border;
+                                                            let text_color = theme.foreground;
+                                                            let muted =
+                                                                theme.muted_foreground;
+                                                            let number_color: Hsla =
+                                                                gpui::rgb(0xf78c6c).into();
+                                                            let active = this.active_tab;
+                                                            if let Some(tab) =
+                                                                this.tabs.get(active)
+                                                            {
+                                                                let cw = px(70.)
+                                                                    + tab
+                                                                        .column_widths
+                                                                        .iter()
+                                                                        .copied()
+                                                                        .fold(
+                                                                            px(0.),
+                                                                            |a, b| a + b,
+                                                                        );
+                                                                range
+                                                                    .map(|ix| {
+                                                                        this.render_data_row(
+                                                                            tab,
+                                                                            ix,
+                                                                            bg,
+                                                                            surface,
+                                                                            border_color,
+                                                                            text_color,
+                                                                            muted,
+                                                                            number_color,
+                                                                            cw,
+                                                                            cx,
+                                                                        )
+                                                                    })
+                                                                    .collect()
+                                                            } else {
+                                                                vec![]
+                                                            }
+                                                        },
+                                                    ),
                                                 )
-                                            })
-                                            .collect()
-                                    } else {
-                                        vec![]
-                                    }
-                                },
-                            ),
-                        )
-                        .h_full()
-                        .track_scroll(scroll_handle.clone()),
-                    )
-                    // Vertical scrollbar overlay
+                                                .h_full()
+                                                .track_scroll(scroll_handle.clone()),
+                                            ),
+                                    ),
+                            )
+                    })
+                    // Vertical scrollbar overlay (outside h-scroll so it stays fixed)
                     .child(
                         div()
                             .occlude()
@@ -672,6 +828,20 @@ impl Render for ResultsGrid {
                             .w(px(16.))
                             .child(
                                 Scrollbar::vertical(&scroll_handle)
+                                    .scrollbar_show(ScrollbarShow::Always),
+                            ),
+                    )
+                    // Horizontal scrollbar overlay (outside h-scroll so it stays fixed)
+                    .child(
+                        div()
+                            .occlude()
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(12.))
+                            .child(
+                                Scrollbar::horizontal(&h_scroll_handle)
                                     .scrollbar_show(ScrollbarShow::Always),
                             ),
                     ),
@@ -690,11 +860,16 @@ impl Render for ResultsGrid {
                     .text_size(px(11.))
                     .text_color(muted)
                     .child(format!(
-                        "{} rows \u{00b7} {}ms \u{00b7} {} columns",
-                        affected, exec_time, col_count
+                        "{} rows \u{00b7} query: {}ms \u{00b7} render: {:.1}ms \u{00b7} {} columns",
+                        affected,
+                        exec_time,
+                        render_start.elapsed().as_secs_f64() * 1000.0,
+                        col_count
                     )),
             )
             // Column info popover overlay — rendered last so it paints on top
             .when_some(column_info_popover, |el, popover| el.child(popover))
+            // Detail panel overlay
+            .when_some(detail_panel, |el, panel| el.child(panel))
     }
 }

@@ -10,7 +10,7 @@ mkdir -p "$APP_DIR/Contents/Resources"
 cp assets/icon.icns "$APP_DIR/Contents/Resources/AppIcon.icns"
 cp target/debug/slate "$APP_DIR/Contents/MacOS/slate"
 
-# Kill any existing instance
-pkill -f "Slate.app/Contents/MacOS/slate" 2>/dev/null || true
+# Kill any existing instance and wait for it to exit
+pkill -f "Slate.app/Contents/MacOS/slate" 2>/dev/null && sleep 0.5 || true
 
 open "$APP_DIR"
