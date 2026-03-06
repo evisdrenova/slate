@@ -35,6 +35,7 @@ pub struct ResultsGrid {
     schema: Option<DatabaseSchema>,
     column_info_idx: Option<usize>,
     detail_cell: Option<(usize, usize)>, // (row_idx, col_idx) for detail panel
+    detail_json_cache: Option<(usize, usize, Option<serde_json::Value>)>, // cached parse
     selected_cell: Option<(usize, usize)>, // (row_idx, col_idx) for highlight
     json_collapsed: HashSet<String>,       // collapsed JSON tree paths (expanded by default)
     initial_render_ms: Option<f64>,        // set once on first render with results
@@ -51,6 +52,7 @@ impl ResultsGrid {
             schema: None,
             column_info_idx: None,
             detail_cell: None,
+            detail_json_cache: None,
             selected_cell: None,
             json_collapsed: HashSet::new(),
             initial_render_ms: None,
@@ -103,6 +105,7 @@ impl ResultsGrid {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.tabs.clear();
         self.active_tab = 0;
@@ -390,12 +393,15 @@ impl ResultsGrid {
         text_color: Hsla,
         muted: Hsla,
         number_color: Hsla,
+        accent: Hsla,
         content_width: Pixels,
         cx: &mut Context<Self>,
     ) -> Div {
         let row = &tab.result.rows[row_idx];
         let is_even = row_idx % 2 == 0;
         let row_bg = if is_even { bg } else { surface };
+        let selected = self.selected_cell;
+        let selected_highlight = accent.opacity(0.15);
 
         let mut row_div = div()
             .flex()
@@ -420,11 +426,8 @@ impl ResultsGrid {
                 .border_color(border_color)
                 .text_size(px(11.))
                 .text_color(muted)
-                .child(format!("{}", row_idx + 1)),
+                .child(SharedString::from(itoa::Buffer::new().format(row_idx + 1).to_string())),
         );
-
-        let selected = self.selected_cell;
-        let accent = cx.theme().primary;
 
         for (i, cell) in row.cells.iter().enumerate() {
             let width = tab
@@ -433,22 +436,27 @@ impl ResultsGrid {
                 .copied()
                 .unwrap_or(px(100.));
 
+            let is_null = cell.is_null();
+            let is_numeric = cell.is_numeric();
+            let is_selected = selected == Some((row_idx, i));
+
             let (text, color) = match cell {
-                CellValue::Null => ("NULL".to_string(), muted),
-                CellValue::Integer(_) | CellValue::Float(_) => (cell.display(), number_color),
-                _ => (cell.display(), text_color),
+                CellValue::Null => (SharedString::from("NULL"), muted),
+                CellValue::Integer(n) => (SharedString::from(itoa::Buffer::new().format(*n).to_string()), number_color),
+                CellValue::Float(f) => (SharedString::from(ryu::Buffer::new().format(*f).to_string()), number_color),
+                CellValue::String(s) => (SharedString::from(s.clone()), text_color),
+                CellValue::Boolean(b) => (SharedString::from(if *b { "true" } else { "false" }), text_color),
+                CellValue::Bytes(b) => (SharedString::from(format!("[{} bytes]", b.len())), text_color),
+                CellValue::DateTime(dt) => (SharedString::from(dt.clone()), text_color),
             };
 
-            let is_null = cell.is_null();
-            let is_selected = selected == Some((row_idx, i));
             let ri = row_idx;
             let ci = i;
 
+            // Use integer ID: row * 10000 + col to avoid format! allocation
             row_div = row_div.child(
                 div()
-                    .id(ElementId::Name(
-                        format!("cell-{}-{}", row_idx, i).into(),
-                    ))
+                    .id(ri * 10000 + ci)
                     .flex_shrink_0()
                     .w(width)
                     .h_full()
@@ -460,8 +468,8 @@ impl ResultsGrid {
                     .text_size(px(12.))
                     .text_color(color)
                     .when(is_null, |el| el.italic())
-                    .when(cell.is_numeric(), |el| el.justify_end())
-                    .when(is_selected, |el| el.bg(accent.opacity(0.15)))
+                    .when(is_numeric, |el| el.justify_end())
+                    .when(is_selected, |el| el.bg(selected_highlight))
                     .overflow_x_hidden()
                     .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
                         if event.click_count() == 2 {
@@ -866,11 +874,22 @@ impl Render for ResultsGrid {
                 let raw = row.cells.get(col_idx).map(|c| c.display()).unwrap_or_default();
                 let col_name = col.name.clone();
 
-                // Build content: JSON tree or plain text
-                let json_parsed = serde_json::from_str::<serde_json::Value>(&raw).ok();
+                // Use cached JSON parse — only re-parse when cell changes
+                let cache_hit = matches!(
+                    self.detail_json_cache,
+                    Some((r, c, _)) if r == row_idx && c == col_idx
+                );
+                if !cache_hit {
+                    let parsed = serde_json::from_str::<serde_json::Value>(&raw).ok();
+                    self.detail_json_cache = Some((row_idx, col_idx, parsed));
+                }
+                let json_parsed = self
+                    .detail_json_cache
+                    .as_ref()
+                    .and_then(|(_, _, v)| v.as_ref());
                 let is_json = json_parsed.is_some();
 
-                let content = if let Some(ref json_val) = json_parsed {
+                let content = if let Some(json_val) = json_parsed {
                     let tree_rows = self.render_json_tree(json_val, "root", 0, cx);
                     div()
                         .flex()
@@ -887,7 +906,7 @@ impl Render for ResultsGrid {
                 };
 
                 // Collect all collapsible paths for collapse-all
-                let all_paths = if let Some(ref json_val) = json_parsed {
+                let all_paths = if let Some(json_val) = json_parsed {
                     let mut paths = Vec::new();
                     Self::collect_json_paths(json_val, "root", &mut paths);
                     paths
@@ -1082,7 +1101,10 @@ impl Render for ResultsGrid {
                                             .flex_1()
                                             .relative()
                                             .overflow_hidden()
-                                            .child(
+                                            .child({
+                                                // Pre-capture theme colors and content width to avoid
+                                                // recomputing inside the processor on every batch
+                                                let cw = total_content_width;
                                                 uniform_list(
                                                     "results-grid",
                                                     row_count,
@@ -1098,21 +1120,13 @@ impl Render for ResultsGrid {
                                                             let text_color = theme.foreground;
                                                             let muted =
                                                                 theme.muted_foreground;
+                                                            let accent = theme.primary;
                                                             let number_color: Hsla =
                                                                 gpui::rgb(0xf78c6c).into();
                                                             let active = this.active_tab;
                                                             if let Some(tab) =
                                                                 this.tabs.get(active)
                                                             {
-                                                                let cw = px(70.)
-                                                                    + tab
-                                                                        .column_widths
-                                                                        .iter()
-                                                                        .copied()
-                                                                        .fold(
-                                                                            px(0.),
-                                                                            |a, b| a + b,
-                                                                        );
                                                                 range
                                                                     .map(|ix| {
                                                                         this.render_data_row(
@@ -1124,6 +1138,7 @@ impl Render for ResultsGrid {
                                                                             text_color,
                                                                             muted,
                                                                             number_color,
+                                                                            accent,
                                                                             cw,
                                                                             cx,
                                                                         )
@@ -1136,8 +1151,8 @@ impl Render for ResultsGrid {
                                                     ),
                                                 )
                                                 .h_full()
-                                                .track_scroll(scroll_handle.clone()),
-                                            ),
+                                                .track_scroll(scroll_handle.clone())
+                                            }),
                                     ),
                             )
                     })

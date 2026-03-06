@@ -11,6 +11,7 @@ use crate::db::schema::DatabaseSchema;
 use crate::db::types::DbType;
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub enum AiEvent {
     InsertSql(String),
     RunSql(String),
@@ -25,6 +26,7 @@ pub struct AiSidebar {
     db_type: Option<DbType>,
     is_loading: bool,
     error: Option<String>,
+    #[allow(dead_code)]
     scroll_handle: UniformListScrollHandle,
     pending_clear_input: bool,
 }
@@ -123,6 +125,7 @@ impl AiSidebar {
         .detach();
     }
 
+    #[allow(dead_code)]
     fn extract_sql_blocks(text: &str) -> Vec<String> {
         let mut blocks = Vec::new();
         let mut in_block = false;

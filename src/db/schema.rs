@@ -21,6 +21,7 @@ pub struct ColumnInfo {
     pub data_type: String,
     pub is_nullable: bool,
     pub is_primary_key: bool,
+    #[allow(dead_code)]
     pub column_key: String,
     pub default_value: Option<String>,
 }

@@ -477,6 +477,7 @@ impl Render for Workspace {
                                         .w(px(4.))
                                         .h_full()
                                         .flex_shrink_0()
+                                        .bg(surface)
                                         .cursor_col_resize()
                                         .hover(|el| el.bg(resize_hover))
                                         .on_mouse_down(

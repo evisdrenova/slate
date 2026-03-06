@@ -21,6 +21,7 @@ pub enum SchemaEvent {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 enum TreeRow {
     Connection(String),
     Database(String),

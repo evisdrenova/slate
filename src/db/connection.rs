@@ -278,6 +278,7 @@ impl DatabaseService {
         })
     }
 
+    #[allow(dead_code)]
     pub fn disconnect(self) {
         match self.backend {
             DatabaseBackend::MySQL(pool) => {

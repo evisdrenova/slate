@@ -18,6 +18,7 @@ actions!(query_editor, [ExecuteQuery, NewTab, CloseTab, SaveQuery, DismissPanel,
 #[derive(Clone)]
 pub enum QueryEvent {
     QueryExecuted(QueryResult, String),
+    #[allow(dead_code)]
     QueryError(String),
 }
 
@@ -62,7 +63,7 @@ impl QueryEditor {
             if matches!(event, InputEvent::PressEnter { secondary: true }) {
                 // Undo the newline the Input just inserted
                 let current = this.sql_input.read(cx).value().to_string();
-                let cleaned = current.trim_end_matches(|c: char| c == '\n' || c == ' ').to_string();
+                let cleaned = current.trim().to_string();
                 this.pending_sql = Some(cleaned.clone());
                 if let Some(tab) = this.tabs.get_mut(this.active_tab) {
                     tab.sql = cleaned;
@@ -408,8 +409,6 @@ impl Render for QueryEditor {
             .items_center()
             .h(px(32.))
             .bg(bg)
-            .border_b_1()
-            .border_color(border_color)
             .px_1()
             .gap(px(1.));
 
@@ -427,7 +426,7 @@ impl Render for QueryEditor {
                 .gap(px(4.))
                 .px_3()
                 .py_1()
-                .rounded_t_md()
+                .rounded_md()
                 .cursor_pointer()
                 .text_size(px(12.))
                 .when(is_active, |el| el.bg(surface).text_color(text_color))
@@ -546,7 +545,7 @@ impl Render for QueryEditor {
                 div()
                     .flex_1()
                     .overflow_hidden()
-                    .child(Input::new(&self.sql_input).h_full().rounded_none()),
+                    .child(Input::new(&self.sql_input).h_full().rounded_none().bordered(false).focus_bordered(false)),
             )
             // Saved queries dropdown panel
             .when(show_saved, |el| {
